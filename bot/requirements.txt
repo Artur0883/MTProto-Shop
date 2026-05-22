@@ -1,1 +1,2 @@
-# Milestone 0 does not need external Python packages.
+aiogram>=3.0,<4.0
+aiosqlite>=0.19,<1.0

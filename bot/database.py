@@ -1,0 +1,405 @@
+from __future__ import annotations
+
+from contextlib import asynccontextmanager
+from datetime import UTC, datetime
+from pathlib import Path
+from typing import Any
+
+import aiosqlite
+
+
+ACTIVE_STATUS = "active"
+DISABLED_STATUS = "disabled"
+EXPIRED_STATUS = "expired"
+
+
+def utc_now() -> datetime:
+    return datetime.now(UTC)
+
+
+def to_db_datetime(value: datetime) -> str:
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=UTC)
+    return value.astimezone(UTC).isoformat()
+
+
+def from_db_datetime(value: str) -> datetime:
+    parsed = datetime.fromisoformat(value)
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=UTC)
+    return parsed.astimezone(UTC)
+
+
+async def connect(database_path: Path) -> aiosqlite.Connection:
+    database_path.parent.mkdir(parents=True, exist_ok=True)
+    db = await aiosqlite.connect(database_path)
+    db.row_factory = aiosqlite.Row
+    await db.execute("PRAGMA foreign_keys = ON")
+    return db
+
+
+@asynccontextmanager
+async def open_db(database_path: Path):
+    db = await connect(database_path)
+    try:
+        yield db
+    finally:
+        await db.close()
+
+
+async def init_db(database_path: Path) -> None:
+    async with open_db(database_path) as db:
+        await db.executescript(
+            """
+            CREATE TABLE IF NOT EXISTS users (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                telegram_id INTEGER NOT NULL UNIQUE,
+                username TEXT,
+                full_name TEXT,
+                created_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS subscriptions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL,
+                secret TEXT,
+                tariff_days INTEGER NOT NULL,
+                starts_at TEXT NOT NULL,
+                expires_at TEXT NOT NULL,
+                status TEXT NOT NULL,
+                reminder_3d_sent INTEGER NOT NULL DEFAULT 0,
+                reminder_1d_sent INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                FOREIGN KEY (user_id) REFERENCES users(id)
+            );
+
+            CREATE TABLE IF NOT EXISTS payments (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL,
+                amount INTEGER,
+                currency TEXT,
+                provider TEXT,
+                status TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                FOREIGN KEY (user_id) REFERENCES users(id)
+            );
+
+            CREATE TABLE IF NOT EXISTS settings (
+                key TEXT PRIMARY KEY,
+                value TEXT
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_users_telegram_id
+                ON users(telegram_id);
+            CREATE INDEX IF NOT EXISTS idx_subscriptions_user_id
+                ON subscriptions(user_id);
+            CREATE INDEX IF NOT EXISTS idx_subscriptions_status_expires
+                ON subscriptions(status, expires_at);
+            """
+        )
+        await db.commit()
+
+
+def row_to_dict(row: aiosqlite.Row | None) -> dict[str, Any] | None:
+    return dict(row) if row is not None else None
+
+
+async def upsert_user(
+    database_path: Path,
+    telegram_id: int,
+    username: str | None,
+    full_name: str,
+) -> dict[str, Any]:
+    now = to_db_datetime(utc_now())
+    async with open_db(database_path) as db:
+        await db.execute(
+            """
+            INSERT INTO users (telegram_id, username, full_name, created_at)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT(telegram_id) DO UPDATE SET
+                username = excluded.username,
+                full_name = excluded.full_name
+            """,
+            (telegram_id, username, full_name, now),
+        )
+        await db.commit()
+        return await get_user_by_telegram_id(database_path, telegram_id)
+
+
+async def get_user_by_telegram_id(
+    database_path: Path,
+    telegram_id: int,
+) -> dict[str, Any] | None:
+    async with open_db(database_path) as db:
+        cursor = await db.execute(
+            "SELECT * FROM users WHERE telegram_id = ?",
+            (telegram_id,),
+        )
+        return row_to_dict(await cursor.fetchone())
+
+
+async def get_recent_users(database_path: Path, limit: int = 10) -> list[dict[str, Any]]:
+    async with open_db(database_path) as db:
+        cursor = await db.execute(
+            """
+            SELECT
+                u.telegram_id,
+                u.username,
+                u.full_name,
+                COALESCE(s.status, 'none') AS subscription_status,
+                s.expires_at
+            FROM users u
+            LEFT JOIN subscriptions s ON s.id = (
+                SELECT id FROM subscriptions
+                WHERE user_id = u.id
+                ORDER BY datetime(created_at) DESC, id DESC
+                LIMIT 1
+            )
+            ORDER BY datetime(u.created_at) DESC, u.id DESC
+            LIMIT ?
+            """,
+            (limit,),
+        )
+        return [dict(row) for row in await cursor.fetchall()]
+
+
+async def get_latest_subscription_by_telegram_id(
+    database_path: Path,
+    telegram_id: int,
+) -> dict[str, Any] | None:
+    async with open_db(database_path) as db:
+        cursor = await db.execute(
+            """
+            SELECT s.*, u.telegram_id
+            FROM subscriptions s
+            JOIN users u ON u.id = s.user_id
+            WHERE u.telegram_id = ?
+            ORDER BY datetime(s.created_at) DESC, s.id DESC
+            LIMIT 1
+            """,
+            (telegram_id,),
+        )
+        return row_to_dict(await cursor.fetchone())
+
+
+async def get_active_subscription_by_telegram_id(
+    database_path: Path,
+    telegram_id: int,
+) -> dict[str, Any] | None:
+    subscription = await get_latest_subscription_by_telegram_id(database_path, telegram_id)
+    if subscription is None or subscription["status"] != ACTIVE_STATUS:
+        return None
+    if from_db_datetime(subscription["expires_at"]) <= utc_now():
+        return None
+    return subscription
+
+
+async def create_subscription(
+    database_path: Path,
+    telegram_id: int,
+    secret: str,
+    tariff_days: int,
+    starts_at: datetime,
+    expires_at: datetime,
+) -> dict[str, Any]:
+    user = await get_user_by_telegram_id(database_path, telegram_id)
+    if user is None:
+        raise ValueError("Пользователь не найден. Сначала он должен нажать /start.")
+
+    now = to_db_datetime(utc_now())
+    async with open_db(database_path) as db:
+        await db.execute(
+            """
+            UPDATE subscriptions
+            SET status = ?
+            WHERE user_id = ? AND status = ?
+            """,
+            (DISABLED_STATUS, user["id"], ACTIVE_STATUS),
+        )
+        await db.execute(
+            """
+            INSERT INTO subscriptions (
+                user_id, secret, tariff_days, starts_at, expires_at, status,
+                reminder_3d_sent, reminder_1d_sent, created_at, updated_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, 0, 0, ?, ?)
+            """,
+            (
+                user["id"],
+                secret,
+                tariff_days,
+                to_db_datetime(starts_at),
+                to_db_datetime(expires_at),
+                ACTIVE_STATUS,
+                now,
+                now,
+            ),
+        )
+        await db.commit()
+
+    return await get_latest_subscription_by_telegram_id(database_path, telegram_id)
+
+
+async def extend_subscription(
+    database_path: Path,
+    telegram_id: int,
+    secret: str,
+    tariff_days: int,
+    starts_at: datetime,
+    expires_at: datetime,
+) -> dict[str, Any]:
+    user = await get_user_by_telegram_id(database_path, telegram_id)
+    if user is None:
+        raise ValueError("Пользователь не найден. Сначала он должен нажать /start.")
+
+    latest = await get_latest_subscription_by_telegram_id(database_path, telegram_id)
+    if latest is None:
+        return await create_subscription(
+            database_path, telegram_id, secret, tariff_days, starts_at, expires_at
+        )
+
+    now = to_db_datetime(utc_now())
+    async with open_db(database_path) as db:
+        await db.execute(
+            """
+            UPDATE subscriptions
+            SET
+                secret = ?,
+                tariff_days = ?,
+                starts_at = ?,
+                expires_at = ?,
+                status = ?,
+                reminder_3d_sent = 0,
+                reminder_1d_sent = 0,
+                updated_at = ?
+            WHERE id = ?
+            """,
+            (
+                secret,
+                tariff_days,
+                to_db_datetime(starts_at),
+                to_db_datetime(expires_at),
+                ACTIVE_STATUS,
+                now,
+                latest["id"],
+            ),
+        )
+        await db.commit()
+
+    return await get_latest_subscription_by_telegram_id(database_path, telegram_id)
+
+
+async def mark_subscription_status(
+    database_path: Path,
+    subscription_id: int,
+    status: str,
+) -> None:
+    async with open_db(database_path) as db:
+        await db.execute(
+            """
+            UPDATE subscriptions
+            SET status = ?, updated_at = ?
+            WHERE id = ?
+            """,
+            (status, to_db_datetime(utc_now()), subscription_id),
+        )
+        await db.commit()
+
+
+async def disable_subscription_by_telegram_id(
+    database_path: Path,
+    telegram_id: int,
+) -> dict[str, Any] | None:
+    subscription = await get_latest_subscription_by_telegram_id(database_path, telegram_id)
+    if subscription is None:
+        return None
+    await mark_subscription_status(database_path, subscription["id"], DISABLED_STATUS)
+    return subscription
+
+
+async def get_expired_active_subscriptions(
+    database_path: Path,
+) -> list[dict[str, Any]]:
+    async with open_db(database_path) as db:
+        cursor = await db.execute(
+            """
+            SELECT s.*, u.telegram_id
+            FROM subscriptions s
+            JOIN users u ON u.id = s.user_id
+            WHERE s.status = ? AND s.expires_at <= ?
+            """,
+            (ACTIVE_STATUS, to_db_datetime(utc_now())),
+        )
+        return [dict(row) for row in await cursor.fetchall()]
+
+
+async def get_active_subscriptions_for_reminders(
+    database_path: Path,
+) -> list[dict[str, Any]]:
+    async with open_db(database_path) as db:
+        cursor = await db.execute(
+            """
+            SELECT s.*, u.telegram_id
+            FROM subscriptions s
+            JOIN users u ON u.id = s.user_id
+            WHERE s.status = ?
+            """,
+            (ACTIVE_STATUS,),
+        )
+        return [dict(row) for row in await cursor.fetchall()]
+
+
+async def mark_reminder_sent(
+    database_path: Path,
+    subscription_id: int,
+    days: int,
+) -> None:
+    column = "reminder_3d_sent" if days == 3 else "reminder_1d_sent"
+    async with open_db(database_path) as db:
+        await db.execute(
+            f"UPDATE subscriptions SET {column} = 1, updated_at = ? WHERE id = ?",
+            (to_db_datetime(utc_now()), subscription_id),
+        )
+        await db.commit()
+
+
+async def get_stats(database_path: Path) -> dict[str, int]:
+    now = to_db_datetime(utc_now())
+    async with open_db(database_path) as db:
+        total_users = (
+            await (await db.execute("SELECT COUNT(*) FROM users")).fetchone()
+        )[0]
+        active = (
+            await (
+                await db.execute(
+                    "SELECT COUNT(*) FROM subscriptions WHERE status = ? AND expires_at > ?",
+                    (ACTIVE_STATUS, now),
+                )
+            ).fetchone()
+        )[0]
+        expired = (
+            await (
+                await db.execute(
+                    """
+                    SELECT COUNT(*) FROM subscriptions
+                    WHERE status = ? OR (status = ? AND expires_at <= ?)
+                    """,
+                    (EXPIRED_STATUS, ACTIVE_STATUS, now),
+                )
+            ).fetchone()
+        )[0]
+        disabled = (
+            await (
+                await db.execute(
+                    "SELECT COUNT(*) FROM subscriptions WHERE status = ?",
+                    (DISABLED_STATUS,),
+                )
+            ).fetchone()
+        )[0]
+    return {
+        "total_users": total_users,
+        "active": active,
+        "expired": expired,
+        "disabled": disabled,
+    }

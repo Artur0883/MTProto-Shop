@@ -1,94 +1,117 @@
 # MTProto Shop
 
-Минимальный каркас для проверки Milestone 0: запуск `mtprotoproxy / alexbers`, создание secret, выдача proxy-ссылки, удаление secret и отключение доступа конкретного клиента.
+Минимальный магазин доступа к MTProto proxy для VPS.
 
-## Milestone 0
+Сейчас реализованы:
 
-### Что входит
+- Milestone 0: рабочий `mtprotoproxy / alexbers`, создание и удаление личных secret через `bot/proxy_manager.py`;
+- Milestone 1: Telegram Bot MVP на `aiogram 3.x`, SQLite через `aiosqlite`, ручная выдача доступа администратором.
 
-- `mtproto` container на базе `alexbers/mtprotoproxy:stable`;
-- минимальный `bot` container без Telegram-магазина, оплат, базы данных и web-админки;
-- CLI `bot/proxy_manager.py` для управления `USERS` в runtime-файле `proxy/config/config.py`;
-- безопасный шаблон `proxy/config/config.example.py` для GitHub;
-- secure/dd режим MTProto proxy;
-- применение изменений без Docker socket внутри bot-контейнера.
+Контейнер `bot` запускает Telegram Bot MVP, а не keep-alive заглушку.
 
-### Режим proxy
+Оплаты, Web Admin Cabinet, React/Vite/nginx/PostgreSQL в этом этапе нет.
 
-Milestone 0 использует secure/dd режим:
+## Как это работает
 
-```python
-MODES = {
-    "classic": False,
-    "secure": True,
-    "tls": False,
-}
-```
+1 клиент = 1 личный secret = 1 личная proxy-ссылка.
 
-В `mtprotoproxy / alexbers` в `USERS` хранится обычный 32-символьный hex secret. Для Telegram-ссылки `proxy_manager.py` публикует secret с префиксом `dd`:
+Бот хранит пользователей и подписки в SQLite. `proxy_link` в базе не хранится: ссылка собирается на лету из `SERVER_HOST`, `PROXY_PORT` и `secret`.
 
-```text
-tg://proxy?server=SERVER_HOST&port=PROXY_PORT&secret=ddSECRET
-```
+Proxy работает в secure/dd режиме `mtprotoproxy / alexbers`: в `proxy/config/config.py` хранится обычный 32-символьный hex secret, а в Telegram-ссылку бот добавляет публичный префикс `dd`.
 
-### Безопасность proxy config
-
-`proxy/config/config.example.py` - безопасный шаблон без реальных client secrets. Его можно хранить в GitHub.
-
-`proxy/config/config.py` - локальный runtime-файл. В нем будут реальные client secrets, поэтому он добавлен в `.gitignore` и не должен коммититься или отправляться в GitHub.
-
-Если `proxy/config/config.py` отсутствует, `bot/proxy_manager.py` создаст его из `proxy/config/config.example.py` при первой команде `create`, `delete`, `list` или `link`.
-
-Создать runtime config вручную:
+После создания или удаления secret бот только обновляет `proxy/config/config.py`. Docker socket в контейнер бота не монтируется. Чтобы proxy применил изменения, команду reload/restart нужно выполнить на host-системе:
 
 ```bash
-cp proxy/config/config.example.py proxy/config/config.py
+docker compose kill -s SIGUSR2 mtproto
 ```
 
-Или через CLI:
+Fallback:
 
 ```bash
-python bot/proxy_manager.py list
+docker compose restart mtproto
 ```
 
-Для первого Docker-запуска, если `config.py` еще нет:
+## Переменные окружения
 
-```bash
-docker compose run --rm bot python proxy_manager.py list
-docker compose up -d
-```
-
-### Подготовка `.env`
+Скопируйте пример:
 
 ```bash
 cp .env.example .env
 ```
 
-В `.env` укажите внешний адрес сервера:
+Заполните:
 
 ```env
+BOT_TOKEN=123456:telegram_bot_token
+ADMIN_ID=123456789
 SERVER_HOST=1.2.3.4
 PROXY_PORT=443
 TLS_DOMAIN=www.google.com
+SUPPORT_CONTACT=@your_support
+DATABASE_PATH=/app/data/shop.db
 ```
 
-### VPS live-test
+Все реальные секреты должны быть только в `.env`.
 
-Запустить контейнеры:
+## Локальная проверка
+
+Windows:
+
+```bash
+python -m venv .venv
+.venv\Scripts\activate
+pip install -r bot/requirements.txt
+python bot/main.py
+```
+
+Linux/macOS:
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r bot/requirements.txt
+python3 bot/main.py
+```
+
+Для локального запуска удобно поставить в `.env`:
+
+```env
+DATABASE_PATH=data/shop.db
+```
+
+## Fresh VPS bootstrap
+
+`proxy/config/config.py` не хранится в GitHub, потому что это runtime-файл с реальными client secrets. При старте `bot/main.py` автоматически создаёт его из безопасного шаблона `proxy/config/config.example.py` и выставляет права `0644`.
+
+Если нужно создать runtime config вручную до общего запуска:
+
+```bash
+docker compose run --rm bot python proxy_manager.py list
+```
+
+Затем запустите сервисы:
 
 ```bash
 docker compose up -d
 ```
 
+## Запуск на VPS
+
+```bash
+cp .env.example .env
+nano .env
+docker compose build
+docker compose up -d
+docker compose ps
+docker compose logs -f bot
+```
+
+## Команды Milestone 0
+
 Создать тестовый secret:
 
 ```bash
 docker compose exec bot python proxy_manager.py create test-client
-```
-
-Применить reload proxy:
-
-```bash
 docker compose kill -s SIGUSR2 mtproto
 ```
 
@@ -102,101 +125,120 @@ docker compose exec bot python proxy_manager.py link test-client
 
 ```bash
 docker compose exec bot python proxy_manager.py delete test-client
+docker compose kill -s SIGUSR2 mtproto
 ```
 
-Снова применить reload:
+Fallback reload:
+
+```bash
+docker compose restart mtproto
+```
+
+## Клиентские функции бота
+
+Команда `/start` регистрирует пользователя в SQLite и показывает меню:
+
+- 🚀 Купить доступ
+- 🔗 Моя ссылка
+- 📅 Осталось дней
+- 💬 Поддержка
+
+Кнопка «Купить доступ» показывает тарифы на 7, 30 и 90 дней и контакт поддержки. Автоматической оплаты пока нет.
+
+Кнопка «Моя ссылка» показывает личную ссылку только при активной подписке.
+
+Кнопка «Осталось дней» показывает дату окончания в UTC и оставшееся количество дней.
+
+## Админские функции
+
+Команда:
+
+```text
+/admin
+```
+
+Доступна только пользователю с `ADMIN_ID` из `.env`.
+
+Меню:
+
+- 👥 Пользователи
+- ➕ Выдать доступ
+- 🔁 Продлить доступ
+- ❌ Отключить доступ
+- 📊 Статистика
+
+## Как админу выдать доступ
+
+1. Клиент сначала нажимает `/start` в боте.
+2. Админ открывает `/admin`.
+3. Нажимает «➕ Выдать доступ».
+4. Вводит `telegram_id` клиента.
+5. Выбирает тариф 7/30/90 дней.
+6. Бот создаёт secret, сохраняет подписку в SQLite и отправляет клиенту личную ссылку.
+7. На VPS админ применяет изменения proxy:
 
 ```bash
 docker compose kill -s SIGUSR2 mtproto
 ```
 
-Fallback, если reload недоступен:
+Fallback:
 
 ```bash
 docker compose restart mtproto
 ```
 
-### Полезные команды
+## Как клиент получает ссылку
 
-Проверить контейнеры:
+После выдачи доступа бот отправит ссылку в личные сообщения. Клиент также может нажать «🔗 Моя ссылка» в меню, пока подписка активна.
 
-```bash
-docker compose ps
-```
+## Продление доступа
 
-Посмотреть логи:
+Админ нажимает «🔁 Продлить доступ», вводит `telegram_id` и выбирает тариф.
 
-```bash
-docker compose logs -f
-docker compose logs -f mtproto
-docker compose logs -f bot
-```
+Если подписка активна, срок продлевается от текущей даты окончания. Если подписка истекла, срок считается от текущего времени UTC. Существующий secret сохраняется, если он уже есть.
 
-Остановить:
+## Отключение доступа
+
+Админ нажимает «❌ Отключить доступ» и вводит `telegram_id`.
+
+Бот удаляет secret из proxy config и ставит подписке `status=disabled`. Затем на VPS нужно применить изменения:
 
 ```bash
-docker compose down
+docker compose kill -s SIGUSR2 mtproto
 ```
 
-### Проверка в Telegram
-
-1. Откройте выданную `tg://proxy?...` ссылку на устройстве с Telegram.
-2. Подтвердите подключение proxy.
-3. Проверьте, что Telegram работает через proxy.
-4. После удаления secret и reload/restart переподключите proxy в Telegram. Старый secret больше не должен проходить аутентификацию.
-
-### Как proxy перечитывает config
-
-`mtprotoproxy / alexbers` загружает `config.py` при старте. В коде proxy есть обработчик `SIGUSR2`, который перечитывает конфиг через `init_config()` и пишет `Config reloaded`.
-
-Bot-контейнер не управляет Docker и не получает доступ к Docker socket. Reload/restart выполняется вручную с host-системы.
-
-Проверить, что reload прошел:
+Fallback:
 
 ```bash
-docker compose logs --tail=50 mtproto
-```
-
-Проверено по исходникам и документации alexbers:
-
-- Docker Hub: https://hub.docker.com/r/alexbers/mtprotoproxy
-- GitHub README: https://github.com/alexbers/mtprotoproxy
-- GitHub source: https://github.com/alexbers/mtprotoproxy/blob/stable/mtprotoproxy.py
-
-### Troubleshooting
-
-Если в логах `mtproto` есть ошибка доступа к config:
-
-```text
-PermissionError: [Errno 13] Permission denied: '/home/tgproxy/config/config.py'
-```
-
-Исправьте права runtime config на host-системе и перезапустите proxy:
-
-```bash
-chmod 644 proxy/config/config.py
 docker compose restart mtproto
 ```
 
-`bot/proxy_manager.py` автоматически выставляет `0644` после создания `config.py` из шаблона и после каждой записи `create/delete`.
+## Автопроверка подписок
 
-### Ограничения Milestone 0
+Фоновая задача раз в час:
 
-- нет оплаты;
-- нет Telegram Bot MVP;
-- нет web admin cabinet;
-- нет PostgreSQL и SQLite;
-- нет nginx;
-- нет автоматического Docker restart/reload из bot-контейнера;
-- `proxy/config/config.py` локальный и не коммитится;
-- удаление secret вступает в силу только после reload через `SIGUSR2` или restart proxy;
-- проверка реального подключения зависит от публичного `SERVER_HOST`, открытого `PROXY_PORT` и доступности Telegram.
+- переводит истёкшие активные подписки в `expired`;
+- удаляет secret из proxy config;
+- отправляет напоминания за 3 дня и за 1 день до окончания.
 
-## Локальная CLI-проверка без Docker
+Важно: после автоматического удаления secret proxy тоже должен перечитать config. Бот не имеет доступа к Docker socket, поэтому reload/restart выполняется с host-системы.
 
-```bash
-python bot/proxy_manager.py list
-python bot/proxy_manager.py create test-client
-python bot/proxy_manager.py link test-client
-python bot/proxy_manager.py delete test-client
-```
+## SQLite
+
+База содержит таблицы:
+
+- `users`
+- `subscriptions`
+- `payments`
+- `settings`
+
+Все даты хранятся в UTC.
+
+## Ограничения текущего этапа
+
+- нет автоматической оплаты;
+- нет Web Admin Cabinet;
+- нет автоматического Docker reload/restart из контейнера бота;
+- удаление или создание secret вступает в силу только после `SIGUSR2` reload или restart proxy;
+- клиент должен нажать `/start` до ручной выдачи доступа;
+- `proxy/config/config.py` локальный runtime-файл и не коммитится.

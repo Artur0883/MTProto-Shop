@@ -17,6 +17,10 @@ CLIENT_RE = re.compile(r"^[A-Za-z0-9_.-]{1,64}$")
 SECURE_SECRET_PREFIX = "dd"
 
 
+class ClientNotFoundError(ValueError):
+    pass
+
+
 def get_example_config_path(config_path: Path) -> Path:
     return config_path.with_name("config.example.py")
 
@@ -156,7 +160,7 @@ def delete_secret(client_id: str) -> str:
     validate_client_id(client_id)
     users = load_users(settings.proxy_config_path)
     if client_id not in users:
-        raise ValueError(f"client '{client_id}' not found")
+        raise ClientNotFoundError(f"client '{client_id}' not found")
 
     secret = users.pop(client_id)
     write_config(settings.proxy_config_path, users)
@@ -169,7 +173,7 @@ def get_link(client_id: str) -> str:
     validate_client_id(client_id)
     users = load_users(settings.proxy_config_path)
     if client_id not in users:
-        raise ValueError(f"client '{client_id}' not found")
+        raise ClientNotFoundError(f"client '{client_id}' not found")
 
     return build_proxy_link(settings.server_host, settings.proxy_port, users[client_id])
 
