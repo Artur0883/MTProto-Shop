@@ -5,8 +5,10 @@ from tariffs import TARIFFS
 
 
 BUY_BUTTON = "🚀 Купить доступ"
-MY_LINK_BUTTON = "🔗 Моя ссылка"
-DAYS_LEFT_BUTTON = "📅 Осталось дней"
+MY_LINK_BUTTON = "🔐 Подключиться"
+OLD_MY_LINK_BUTTON = "🔗 Моя ссылка"
+DAYS_LEFT_BUTTON = "⏳ Срок доступа"
+OLD_DAYS_LEFT_BUTTON = "📅 Осталось дней"
 SUPPORT_BUTTON = "💬 Поддержка"
 
 USERS_BUTTON = "👥 Пользователи"
@@ -44,17 +46,46 @@ def admin_menu() -> ReplyKeyboardMarkup:
 
 
 def client_tariff_keyboard() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
+    buttons = []
+
+    for tariff in TARIFFS.values():
+        callback_data = (
+            f"client_tariff:{tariff.days}"
+            if tariff.enabled
+            else f"client_tariff_disabled:{tariff.days}"
+        )
+        buttons.append(
             [
                 InlineKeyboardButton(
                     text=tariff.title,
-                    callback_data=f"client_tariff:{tariff.days}",
+                    callback_data=callback_data,
                 )
             ]
-            for tariff in TARIFFS.values()
+        )
+
+    buttons.append([InlineKeyboardButton(text=BACK_BUTTON, callback_data="client_back")])
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
+
+
+def connect_keyboard(link: str) -> InlineKeyboardMarkup:
+    if link.startswith("tg://proxy?"):
+        button_url = "https://t.me/proxy?" + link.split("?", 1)[1]
+    else:
+        button_url = link
+
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="🔐 Подключиться к MTProto", url=button_url)],
+            [InlineKeyboardButton(text="💬 Нужна помощь", callback_data="client_support_inline")],
         ]
-        + [[InlineKeyboardButton(text=BACK_BUTTON, callback_data="client_back")]]
+    )
+
+
+def support_keyboard(url: str) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="💬 Открыть чат поддержки", url=url)]
+        ]
     )
 
 
@@ -68,5 +99,6 @@ def tariff_keyboard(action: str) -> InlineKeyboardMarkup:
                 )
             ]
             for tariff in TARIFFS.values()
+            if tariff.enabled
         ]
     )

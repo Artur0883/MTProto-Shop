@@ -31,6 +31,7 @@ from keyboards import (
     STATS_BUTTON,
     USERS_BUTTON,
     admin_menu,
+    connect_keyboard,
     tariff_keyboard,
 )
 from proxy_manager import (
@@ -283,8 +284,8 @@ async def choose_tariff(callback: CallbackQuery, state: FSMContext, bot: Bot) ->
     await bot.send_message(
         telegram_id,
         f"{client_text}\n\n"
-        f"Срок до: {expires_at_text}\n"
-        f"Личная ссылка:\n{escape(link)}",
+        f"⏳ Действует до: {expires_at_text}",
+        reply_markup=connect_keyboard(link),
     )
     await message.answer(
         f"{admin_text}\n\n"
@@ -370,10 +371,9 @@ async def rotate_user_id(message: Message, state: FSMContext, bot: Bot) -> None:
     try:
         await bot.send_message(
             telegram_id,
-            "Администратор обновил ваш ключ доступа.\n\n"
-            f"Срок до: {expires_at_text}\n"
-            f"Новая личная ссылка:\n{escape(link)}\n\n"
-            "Старая ссылка больше не будет работать после обновления proxy.",
+            "🔄 Администратор обновил ваш ключ доступа.\n\n"
+            f"⏳ Действует до: {expires_at_text}",
+            reply_markup=connect_keyboard(link),
         )
     except Exception as exc:
         logging.warning("Failed to notify rotated user %s: %s", telegram_id, exc)

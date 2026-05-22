@@ -65,8 +65,7 @@ install_or_update() {
     return 0
   }
   echo -e "${BLUE}Собираю и запускаю контейнеры...${NC}"
-  $COMPOSE_CMD build
-  $COMPOSE_CMD up -d
+  $COMPOSE_CMD up -d --build --force-recreate
   $COMPOSE_CMD ps
 }
 
@@ -82,6 +81,41 @@ show_bot_logs() {
 show_proxy_logs() {
   echo "Выход из логов: Ctrl+C"
   $COMPOSE_CMD logs -f --tail=120 mtproto
+}
+
+restart_bot() {
+  echo
+  echo -e "${BLUE}Пересоздаю Telegram-бота...${NC}"
+  $COMPOSE_CMD up -d --build --force-recreate bot
+  echo -e "${GREEN}Готово: бот пересоздан.${NC}"
+  echo
+  $COMPOSE_CMD ps bot
+}
+
+restart_proxy_container() {
+  echo
+  echo -e "${BLUE}Пересоздаю MTProto proxy...${NC}"
+  $COMPOSE_CMD up -d --force-recreate mtproto
+  echo -e "${GREEN}Готово: MTProto proxy пересоздан.${NC}"
+  echo
+  $COMPOSE_CMD ps mtproto
+}
+
+restart_all_services() {
+  echo
+  echo -e "${BLUE}Пересоздаю бота и MTProto proxy...${NC}"
+  $COMPOSE_CMD up -d --build --force-recreate bot mtproto
+  echo -e "${GREEN}Готово: бот и MTProto proxy пересозданы.${NC}"
+  echo
+  $COMPOSE_CMD ps
+}
+
+reboot_vps() {
+  echo -e "${RED}Внимание: VPS будет полностью перезагружен.${NC}"
+  read -r -p "Точно перезагрузить сервер? Напишите REBOOT: " answer
+  [[ "$answer" == "REBOOT" ]] || { echo "Отменено"; return 0; }
+  echo -e "${YELLOW}Перезагружаю сервер... SSH-сессия сейчас отключится.${NC}"
+  reboot
 }
 
 list_keys() {
@@ -150,6 +184,10 @@ while true; do
   echo "11) ♻️ Применить изменения proxy"
   echo "12) ⚙️ Открыть .env"
   echo "13) 💾 Сделать бэкап"
+  echo "14) 🔁 Пересоздать Telegram-бота"
+  echo "15) 🔁 Пересоздать MTProto proxy"
+  echo "16) 🔁 Пересоздать бота + MTProto proxy"
+  echo "17) 🖥️ Перезагрузить VPS полностью"
   echo "0) 🚪 Выход"
   echo
   read -r -p "Выберите действие: " choice
@@ -168,6 +206,10 @@ while true; do
     11) reload_proxy; pause ;;
     12) edit_env; pause ;;
     13) backup_now; pause ;;
+    14) restart_bot; pause ;;
+    15) restart_proxy_container; pause ;;
+    16) restart_all_services; pause ;;
+    17) reboot_vps ;;
     0) exit 0 ;;
     *) echo "Неверный пункт"; pause ;;
   esac
