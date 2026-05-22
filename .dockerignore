@@ -1,0 +1,11 @@
+.env
+data/
+backups/
+.git/
+.venv/
+__pycache__/
+logs/
+proxy/config/tmp*
+*.db
+*.sqlite
+*.log

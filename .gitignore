@@ -1,0 +1,14 @@
+.env
+data/
+backups/
+logs/
+proxy/config/config.py
+proxy/config/tmp*
+*.db
+*.sqlite
+*.log
+__pycache__/
+.venv/
+
+.claude/
+

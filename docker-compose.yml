@@ -1,0 +1,31 @@
+services:
+  mtproto:
+    image: alexbers/mtprotoproxy:stable
+    container_name: mtproto-shop-proxy
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      PROXY_PORT: ${PROXY_PORT:-443}
+      TLS_DOMAIN: ${TLS_DOMAIN:-www.google.com}
+    ports:
+      - "${PROXY_PORT:-443}:${PROXY_PORT:-443}/tcp"
+    volumes:
+      - ./proxy/config:/home/tgproxy/config:ro
+    command: ["python3", "mtprotoproxy.py", "/home/tgproxy/config/config.py"]
+
+  bot:
+    build:
+      context: .
+      dockerfile: bot/Dockerfile
+    container_name: mtproto-shop-bot
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      PROXY_CONFIG_PATH: /app/proxy/config/config.py
+    volumes:
+      - ./proxy/config:/app/proxy/config
+      - ./data:/app/data
+      - ./backups:/app/backups
+      - ./logs:/app/logs
