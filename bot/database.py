@@ -318,6 +318,29 @@ async def disable_subscription_by_telegram_id(
     return subscription
 
 
+async def update_latest_subscription_secret_by_telegram_id(
+    database_path: Path,
+    telegram_id: int,
+    secret: str,
+) -> dict[str, Any] | None:
+    subscription = await get_latest_subscription_by_telegram_id(database_path, telegram_id)
+    if subscription is None:
+        return None
+
+    async with open_db(database_path) as db:
+        await db.execute(
+            """
+            UPDATE subscriptions
+            SET secret = ?, updated_at = ?
+            WHERE id = ?
+            """,
+            (secret, to_db_datetime(utc_now()), subscription["id"]),
+        )
+        await db.commit()
+
+    return await get_latest_subscription_by_telegram_id(database_path, telegram_id)
+
+
 async def get_expired_active_subscriptions(
     database_path: Path,
 ) -> list[dict[str, Any]]:

@@ -1,4 +1,5 @@
 import argparse
+import asyncio
 import logging
 import os
 import re
@@ -168,6 +169,56 @@ def delete_secret(client_id: str) -> str:
     return secret
 
 
+def rotate_secret(client_id: str) -> str:
+    settings = get_settings()
+    validate_client_id(client_id)
+    users = load_users(settings.proxy_config_path)
+    if client_id not in users:
+        raise ClientNotFoundError(f"client '{client_id}' not found")
+
+    old_secret = users[client_id]
+    new_secret = generate_secret()
+    users[client_id] = new_secret
+    write_config(settings.proxy_config_path, users)
+    logging.info(
+        "Rotated secret for %s: %s -> %s",
+        client_id,
+        mask_secret(old_secret),
+        mask_secret(new_secret),
+    )
+    return new_secret
+
+
+async def rotate_telegram_secret(telegram_id: int) -> str:
+    from database import (
+        get_latest_subscription_by_telegram_id,
+        update_latest_subscription_secret_by_telegram_id,
+    )
+
+    settings = get_settings()
+    subscription = await get_latest_subscription_by_telegram_id(
+        settings.database_path,
+        telegram_id,
+    )
+    if subscription is None:
+        raise ClientNotFoundError(
+            f"subscription for telegram_id '{telegram_id}' not found"
+        )
+
+    client_id = f"tg_{telegram_id}"
+    secret = rotate_secret(client_id)
+    updated = await update_latest_subscription_secret_by_telegram_id(
+        settings.database_path,
+        telegram_id,
+        secret,
+    )
+    if updated is None:
+        raise ClientNotFoundError(
+            f"subscription for telegram_id '{telegram_id}' not found"
+        )
+    return secret
+
+
 def get_link(client_id: str) -> str:
     settings = get_settings()
     validate_client_id(client_id)
@@ -194,6 +245,15 @@ def build_parser() -> argparse.ArgumentParser:
     delete = subparsers.add_parser("delete", help="delete client secret")
     delete.add_argument("client_id")
 
+    rotate = subparsers.add_parser("rotate", help="generate a new secret for client")
+    rotate.add_argument("client_id")
+
+    rotate_tg = subparsers.add_parser(
+        "rotate-telegram",
+        help="generate a new secret for Telegram user and sync latest subscription in DB",
+    )
+    rotate_tg.add_argument("telegram_id", type=int)
+
     link = subparsers.add_parser("link", help="print proxy link for client")
     link.add_argument("client_id")
 
@@ -215,6 +275,17 @@ def main() -> int:
         elif args.command == "delete":
             secret = delete_secret(args.client_id)
             print(f"deleted {args.client_id}: {mask_secret(secret)}")
+            print("apply changes: docker compose kill -s SIGUSR2 mtproto")
+        elif args.command == "rotate":
+            secret = rotate_secret(args.client_id)
+            print(get_link(args.client_id))
+            print(f"rotated {args.client_id}: {mask_secret(secret)}")
+            print("apply changes: docker compose kill -s SIGUSR2 mtproto")
+        elif args.command == "rotate-telegram":
+            secret = asyncio.run(rotate_telegram_secret(args.telegram_id))
+            print(get_link(f"tg_{args.telegram_id}"))
+            print(f"rotated tg_{args.telegram_id}: {mask_secret(secret)}")
+            print("subscription secret in SQLite was updated")
             print("apply changes: docker compose kill -s SIGUSR2 mtproto")
         elif args.command == "link":
             print(get_link(args.client_id))

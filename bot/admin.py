@@ -20,12 +20,14 @@ from database import (
     get_stats,
     get_user_by_telegram_id,
     mark_subscription_status,
+    update_latest_subscription_secret_by_telegram_id,
     utc_now,
 )
 from keyboards import (
     DISABLE_ACCESS_BUTTON,
     EXTEND_ACCESS_BUTTON,
     ISSUE_ACCESS_BUTTON,
+    ROTATE_ACCESS_BUTTON,
     STATS_BUTTON,
     USERS_BUTTON,
     admin_menu,
@@ -37,6 +39,7 @@ from proxy_manager import (
     create_secret,
     delete_secret,
     list_clients,
+    rotate_secret,
 )
 from tariffs import get_tariff
 
@@ -49,6 +52,7 @@ class AdminStates(StatesGroup):
     issue_tariff = State()
     extend_user_id = State()
     extend_tariff = State()
+    rotate_user_id = State()
     disable_user_id = State()
 
 
@@ -294,6 +298,96 @@ async def choose_tariff(callback: CallbackQuery, state: FSMContext, bot: Bot) ->
     )
     await state.clear()
     await callback.answer()
+
+
+@router.message(F.text == ROTATE_ACCESS_BUTTON)
+async def rotate_access(message: Message, state: FSMContext) -> None:
+    if await deny_if_not_admin(message):
+        return
+    await state.set_state(AdminStates.rotate_user_id)
+    await message.answer(
+        "Введите telegram_id пользователя, которому нужно обновить ключ."
+    )
+
+
+@router.message(AdminStates.rotate_user_id)
+async def rotate_user_id(message: Message, state: FSMContext, bot: Bot) -> None:
+    if await deny_if_not_admin(message):
+        return
+
+    settings = get_settings()
+    try:
+        telegram_id = parse_telegram_id(message.text)
+    except ValueError as exc:
+        await message.answer(str(exc))
+        return
+
+    subscription = await get_latest_subscription_by_telegram_id(
+        settings.database_path,
+        telegram_id,
+    )
+    if subscription is None:
+        await message.answer("Подписка не найдена.", reply_markup=admin_menu())
+        await state.clear()
+        return
+
+    client_id = client_id_for(telegram_id)
+    try:
+        secret = rotate_secret(client_id)
+        subscription = await update_latest_subscription_secret_by_telegram_id(
+            settings.database_path,
+            telegram_id,
+            secret,
+        )
+        if subscription is None:
+            raise ValueError("Подписка не найдена после обновления ключа.")
+    except ClientNotFoundError:
+        await message.answer(
+            "Ключ не найден в proxy config. "
+            "Сначала выдайте или продлите доступ этому пользователю.",
+            reply_markup=admin_menu(),
+        )
+        await state.clear()
+        return
+    except Exception as exc:
+        logging.exception(
+            "Failed to rotate secret for telegram_id=%s",
+            telegram_id,
+        )
+        await message.answer(
+            "Не удалось обновить ключ. Старый ключ мог остаться активным.\n\n"
+            f"Ошибка: {escape(str(exc))}",
+            reply_markup=admin_menu(),
+        )
+        await state.clear()
+        return
+
+    link = subscription_link(subscription["secret"])
+    expires_at_text = from_db_datetime(subscription["expires_at"]).strftime(
+        "%Y-%m-%d %H:%M UTC"
+    )
+
+    try:
+        await bot.send_message(
+            telegram_id,
+            "Администратор обновил ваш ключ доступа.\n\n"
+            f"Срок до: {expires_at_text}\n"
+            f"Новая личная ссылка:\n{escape(link)}\n\n"
+            "Старая ссылка больше не будет работать после обновления proxy.",
+        )
+    except Exception as exc:
+        logging.warning("Failed to notify rotated user %s: %s", telegram_id, exc)
+
+    await message.answer(
+        "Ключ обновлён.\n\n"
+        f"Пользователь: {telegram_id}\n"
+        f"Срок до: {expires_at_text}\n\n"
+        "Чтобы изменения вступили в силу на proxy, выполните на host-системе:\n"
+        "docker compose kill -s SIGUSR2 mtproto\n"
+        "fallback: docker compose restart mtproto",
+        reply_markup=admin_menu(),
+    )
+    await state.clear()
 
 
 @router.message(F.text == DISABLE_ACCESS_BUTTON)
