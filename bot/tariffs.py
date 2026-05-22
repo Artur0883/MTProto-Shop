@@ -8,9 +8,10 @@ class Tariff:
 
 
 TARIFFS: dict[int, Tariff] = {
-    7: Tariff(days=7, title="7 дней"),
-    30: Tariff(days=30, title="30 дней"),
-    90: Tariff(days=90, title="90 дней"),
+    30: Tariff(days=30, title="🗓 1 месяц"),
+    90: Tariff(days=90, title="🗓 3 месяца"),
+    180: Tariff(days=180, title="🗓 6 месяцев"),
+    365: Tariff(days=365, title="🗓 12 месяцев"),
 }
 
 

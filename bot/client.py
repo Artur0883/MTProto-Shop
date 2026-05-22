@@ -1,14 +1,18 @@
-from datetime import UTC
+from datetime import UTC, timedelta
 from html import escape
 
 from aiogram import F, Router
 from aiogram.filters import CommandStart
-from aiogram.types import Message
+from aiogram.types import CallbackQuery, Message
 
 from config import get_settings
 from database import (
+    ACTIVE_STATUS,
+    create_subscription,
+    extend_subscription,
     from_db_datetime,
     get_active_subscription_by_telegram_id,
+    get_latest_subscription_by_telegram_id,
     upsert_user,
     utc_now,
 )
@@ -18,9 +22,10 @@ from keyboards import (
     MY_LINK_BUTTON,
     SUPPORT_BUTTON,
     client_menu,
+    client_tariff_keyboard,
 )
-from proxy_manager import build_proxy_link
-from tariffs import format_tariffs
+from proxy_manager import build_proxy_link, create_secret, list_clients
+from tariffs import get_tariff
 
 
 router = Router()
@@ -35,6 +40,17 @@ def days_left(expires_at: str) -> int:
     if delta.total_seconds() <= 0:
         return 0
     return max(1, delta.days + (1 if delta.seconds else 0))
+
+
+def client_id_for(telegram_id: int) -> str:
+    return f"tg_{telegram_id}"
+
+
+def ensure_secret(client_id: str, preferred_secret: str | None = None) -> str:
+    users = list_clients()
+    if client_id in users:
+        return users[client_id]
+    return create_secret(client_id, preferred_secret)
 
 
 @router.message(CommandStart())
@@ -61,13 +77,113 @@ async def start(message: Message) -> None:
 
 @router.message(F.text == BUY_BUTTON)
 async def buy_access(message: Message) -> None:
-    settings = get_settings()
     await message.answer(
-        "Доступные тарифы:\n"
-        f"{format_tariffs()}\n\n"
-        "Автоматической оплаты пока нет. После оплаты администратор вручную "
-        "выдаст доступ и бот пришлёт личную ссылку.\n\n"
-        f"Поддержка: {escape(settings.support_contact)}",
+        "Выберите срок доступа:",
+        reply_markup=client_tariff_keyboard(),
+    )
+
+
+@router.callback_query(F.data == "client_back")
+async def client_back(callback: CallbackQuery) -> None:
+    message = callback.message
+    if message is None or not hasattr(message, "answer"):
+        await callback.answer("Откройте меню командой /start.", show_alert=True)
+        return
+
+    await callback.answer()
+    await message.answer("Главное меню", reply_markup=client_menu())
+
+
+@router.callback_query(F.data.startswith("client_tariff:"))
+async def choose_client_tariff(callback: CallbackQuery) -> None:
+    settings = get_settings()
+    user = callback.from_user
+    message = callback.message
+    if user is None:
+        await callback.answer("Не удалось определить пользователя.", show_alert=True)
+        return
+    if message is None or not hasattr(message, "answer"):
+        await callback.answer("Откройте меню командой /start.", show_alert=True)
+        return
+
+    parts = (callback.data or "").split(":")
+    if len(parts) != 2:
+        await callback.answer("Тариф не найден.", show_alert=True)
+        return
+
+    try:
+        tariff = get_tariff(int(parts[1]))
+    except (TypeError, ValueError):
+        await callback.answer("Тариф не найден.", show_alert=True)
+        return
+
+    await upsert_user(
+        settings.database_path,
+        telegram_id=user.id,
+        username=user.username,
+        full_name=user.full_name,
+    )
+
+    if not settings.test_auto_issue_access:
+        await callback.answer()
+        await message.answer(
+            "Автоматическая оплата пока не подключена. "
+            "Напишите администратору для оплаты.\n\n"
+            f"Поддержка: {escape(settings.support_contact)}",
+            reply_markup=client_menu(),
+        )
+        return
+
+    latest = await get_latest_subscription_by_telegram_id(
+        settings.database_path,
+        user.id,
+    )
+    previous_secret = latest["secret"] if latest and latest["secret"] else None
+    secret = ensure_secret(client_id_for(user.id), previous_secret)
+
+    now = utc_now()
+    if latest and latest["status"] == ACTIVE_STATUS:
+        base = max(from_db_datetime(latest["expires_at"]), now)
+        subscription = await extend_subscription(
+            settings.database_path,
+            user.id,
+            secret,
+            tariff.days,
+            now,
+            base + timedelta(days=tariff.days),
+        )
+    elif latest:
+        subscription = await extend_subscription(
+            settings.database_path,
+            user.id,
+            secret,
+            tariff.days,
+            now,
+            now + timedelta(days=tariff.days),
+        )
+    else:
+        subscription = await create_subscription(
+            settings.database_path,
+            user.id,
+            secret,
+            tariff.days,
+            now,
+            now + timedelta(days=tariff.days),
+        )
+
+    link = build_proxy_link(
+        settings.server_host,
+        settings.proxy_port,
+        subscription["secret"],
+    )
+    await callback.answer("Доступ выдан")
+    await message.answer(
+        f"Тариф: {escape(tariff.title)}\n"
+        f"Доступ до: {format_datetime(subscription['expires_at'])}\n\n"
+        "Ваша личная ссылка:\n"
+        f"{escape(link)}\n\n"
+        "Доступ может активироваться в течение 1 минуты. "
+        "Если не подключилось — напишите в поддержку.",
         reply_markup=client_menu(),
     )
 

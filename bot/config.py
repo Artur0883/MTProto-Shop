@@ -1,6 +1,11 @@
 import os
+import re
 from dataclasses import dataclass
 from pathlib import Path
+
+
+TOKEN_LIKE_RE = re.compile(r"^\d{5,}:[A-Za-z0-9_-]{20,}$")
+SAFE_SUPPORT_FALLBACK = "Поддержка временно не указана."
 
 
 def load_dotenv(path: Path = Path(".env")) -> None:
@@ -17,6 +22,23 @@ def load_dotenv(path: Path = Path(".env")) -> None:
         os.environ.setdefault(key, value)
 
 
+def parse_bool(value: str | None, default: bool = False) -> bool:
+    if value is None:
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "y", "on"}
+
+
+def sanitize_support_contact(contact: str, bot_token: str) -> str:
+    contact = contact.strip()
+    if not contact:
+        return SAFE_SUPPORT_FALLBACK
+    if bot_token and contact == bot_token:
+        return SAFE_SUPPORT_FALLBACK
+    if TOKEN_LIKE_RE.fullmatch(contact):
+        return SAFE_SUPPORT_FALLBACK
+    return contact
+
+
 @dataclass(frozen=True)
 class Settings:
     bot_token: str
@@ -26,16 +48,18 @@ class Settings:
     proxy_config_path: Path
     database_path: Path
     support_contact: str
+    test_auto_issue_access: bool
 
 
 def get_settings() -> Settings:
     load_dotenv()
 
+    bot_token = os.getenv("BOT_TOKEN", "").strip()
     admin_id_raw = os.getenv("ADMIN_ID", "").strip()
     admin_id = int(admin_id_raw) if admin_id_raw else None
 
     return Settings(
-        bot_token=os.getenv("BOT_TOKEN", "").strip(),
+        bot_token=bot_token,
         admin_id=admin_id,
         server_host=os.getenv("SERVER_HOST", "SERVER_HOST"),
         proxy_port=int(os.getenv("PROXY_PORT", "443")),
@@ -43,8 +67,12 @@ def get_settings() -> Settings:
             os.getenv("PROXY_CONFIG_PATH", "proxy/config/config.py")
         ),
         database_path=Path(os.getenv("DATABASE_PATH", "data/shop.db")),
-        support_contact=os.getenv(
-            "SUPPORT_CONTACT",
-            "Напишите администратору этого бота для оплаты и поддержки.",
+        support_contact=sanitize_support_contact(
+            os.getenv("SUPPORT_CONTACT", ""),
+            bot_token,
+        ),
+        test_auto_issue_access=parse_bool(
+            os.getenv("TEST_AUTO_ISSUE_ACCESS"),
+            default=True,
         ),
     )

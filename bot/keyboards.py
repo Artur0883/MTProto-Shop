@@ -14,6 +14,7 @@ ISSUE_ACCESS_BUTTON = "➕ Выдать доступ"
 EXTEND_ACCESS_BUTTON = "🔁 Продлить доступ"
 DISABLE_ACCESS_BUTTON = "❌ Отключить доступ"
 STATS_BUTTON = "📊 Статистика"
+BACK_BUTTON = "⬅️ Назад"
 
 
 def client_menu() -> ReplyKeyboardMarkup:
@@ -37,6 +38,21 @@ def admin_menu() -> ReplyKeyboardMarkup:
         ],
         resize_keyboard=True,
         input_field_placeholder="Админ-меню",
+    )
+
+
+def client_tariff_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text=tariff.title,
+                    callback_data=f"client_tariff:{tariff.days}",
+                )
+            ]
+            for tariff in TARIFFS.values()
+        ]
+        + [[InlineKeyboardButton(text=BACK_BUTTON, callback_data="client_back")]]
     )
 
 
