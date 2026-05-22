@@ -13,6 +13,7 @@ from database import (
     ACTIVE_STATUS,
     DISABLED_STATUS,
     create_subscription,
+    delete_user_cascade,
     extend_subscription,
     from_db_datetime,
     get_latest_subscription_by_telegram_id,
@@ -31,6 +32,7 @@ from keyboards import (
     STATS_BUTTON,
     USERS_BUTTON,
     admin_menu,
+    confirm_delete_keyboard,
     connect_keyboard,
     tariff_keyboard,
     user_card_keyboard,
@@ -48,6 +50,17 @@ from tariffs import get_tariff
 
 
 router = Router()
+
+
+SIGUSR2_NOTICE = (
+    "<b>⚠️ Чтобы клиент потерял соединение прямо сейчас:</b>\n"
+    "1. Откройте <code>mtp</code> → пункт <b>11</b> (♻️ Применить изменения proxy)\n"
+    "Или вручную: <code>docker compose kill -s SIGUSR2 mtproto</code>"
+)
+
+
+def access_disabled_text(note: str = "") -> str:
+    return f"✅ <b>Доступ отключён</b>{note}\n\n" + SIGUSR2_NOTICE
 
 
 class AdminStates(StatesGroup):
@@ -410,10 +423,6 @@ async def admin_card_disable(callback: CallbackQuery) -> None:
         settings.database_path,
         telegram_id,
     )
-    if subscription is None:
-        await callback.answer("Подписка не найдена.", show_alert=True)
-        await edit_user_card(callback, telegram_id, answer_callback=False)
-        return
 
     try:
         delete_secret(client_id_for(telegram_id))
@@ -433,20 +442,113 @@ async def admin_card_disable(callback: CallbackQuery) -> None:
         await callback.answer()
         return
 
-    await mark_subscription_status(
-        settings.database_path,
-        subscription["id"],
-        DISABLED_STATUS,
-    )
+    if subscription is not None:
+        await mark_subscription_status(
+            settings.database_path,
+            subscription["id"],
+            DISABLED_STATUS,
+        )
 
     if message is not None and hasattr(message, "answer"):
-        await message.answer(
-            "Доступ отключён.\n\n"
-            "Чтобы изменения вступили в силу на proxy, выполните на host-системе:\n"
-            "docker compose kill -s SIGUSR2 mtproto\n"
-            "fallback: docker compose restart mtproto"
-        )
+        await message.answer(access_disabled_text())
     await edit_user_card(callback, telegram_id)
+
+
+@router.callback_query(F.data.startswith("admin_card_delete:"))
+async def admin_card_delete(callback: CallbackQuery) -> None:
+    user = callback.from_user
+    if user is None or not is_admin(user.id):
+        await callback.answer("Доступ запрещён.", show_alert=True)
+        return
+
+    message = callback.message
+    if message is None or not hasattr(message, "edit_text"):
+        await callback.answer(
+            "Сообщение устарело. Откройте карточку заново.",
+            show_alert=True,
+        )
+        return
+
+    parts = (callback.data or "").split(":")
+    if len(parts) != 2 or not parts[1].isdigit():
+        await callback.answer("Некорректный пользователь.", show_alert=True)
+        return
+    telegram_id = int(parts[1])
+
+    await message.edit_text(
+        f"<b>⚠️ Удалить пользователя {telegram_id} полностью?</b>\n\n"
+        "Будут удалены:\n"
+        "• ключ из proxy/config/config.py\n"
+        "• подписки в БД\n"
+        "• запись пользователя в БД\n\n"
+        "Действие необратимо.",
+        reply_markup=confirm_delete_keyboard(telegram_id),
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("admin_card_delete_yes:"))
+async def admin_card_delete_yes(callback: CallbackQuery) -> None:
+    user = callback.from_user
+    if user is None or not is_admin(user.id):
+        await callback.answer("Доступ запрещён.", show_alert=True)
+        return
+
+    message = callback.message
+    if message is None or not hasattr(message, "answer"):
+        await callback.answer(
+            "Сообщение устарело. Откройте список заново.",
+            show_alert=True,
+        )
+        return
+
+    parts = (callback.data or "").split(":")
+    if len(parts) != 2 or not parts[1].isdigit():
+        await callback.answer("Некорректный пользователь.", show_alert=True)
+        return
+    telegram_id = int(parts[1])
+
+    settings = get_settings()
+    try:
+        delete_secret(client_id_for(telegram_id))
+    except ClientNotFoundError:
+        pass
+    except Exception as exc:
+        logging.exception(
+            "Failed to delete secret for telegram_id=%s during full delete",
+            telegram_id,
+        )
+        await message.answer(
+            "Secret не удалось удалить из proxy config. "
+            "Пользователь в БД не удалён, попробуйте повторить позже.\n\n"
+            f"Ошибка: {escape(str(exc))}"
+        )
+        await callback.answer()
+        return
+
+    await delete_user_cascade(settings.database_path, telegram_id)
+    await message.answer(
+        f"🗑 <b>Пользователь {telegram_id} удалён полностью.</b>\n\n"
+        + SIGUSR2_NOTICE
+    )
+    await callback.answer()
+
+    rows = await get_recent_users(settings.database_path, limit=10)
+    if not rows:
+        await message.answer("Пользователей пока нет.", reply_markup=admin_menu())
+        return
+
+    lines = ["Последние пользователи:"]
+    for row in rows:
+        username = f"@{row['username']}" if row["username"] else "-"
+        status = row["subscription_status"]
+        if status == ACTIVE_STATUS and row["expires_at"]:
+            status = f"active до {from_db_datetime(row['expires_at']).strftime('%Y-%m-%d')}"
+        lines.append(
+            f"{row['telegram_id']} | {escape(username)} | "
+            f"{escape(row['full_name'] or '-')} | {escape(status)}"
+        )
+    await message.answer("\n".join(lines), reply_markup=users_keyboard(rows))
 
 
 @router.message(F.text == ISSUE_ACCESS_BUTTON)
@@ -738,10 +840,6 @@ async def disable_user_id(message: Message, state: FSMContext) -> None:
         settings.database_path,
         telegram_id,
     )
-    if subscription is None:
-        await message.answer("Подписка не найдена.", reply_markup=admin_menu())
-        await state.clear()
-        return
 
     try:
         delete_secret(client_id_for(telegram_id))
@@ -760,17 +858,17 @@ async def disable_user_id(message: Message, state: FSMContext) -> None:
         await state.clear()
         return
 
-    await mark_subscription_status(
-        settings.database_path,
-        subscription["id"],
-        DISABLED_STATUS,
-    )
+    if subscription is not None:
+        await mark_subscription_status(
+            settings.database_path,
+            subscription["id"],
+            DISABLED_STATUS,
+        )
 
     await message.answer(
-        "Доступ отключён.\n\n"
-        "Чтобы изменения вступили в силу на proxy, выполните на host-системе:\n"
-        "docker compose kill -s SIGUSR2 mtproto\n"
-        "fallback: docker compose restart mtproto",
+        access_disabled_text(
+            " (подписки в БД не было)" if subscription is None else ""
+        ),
         reply_markup=admin_menu(),
     )
     await state.clear()

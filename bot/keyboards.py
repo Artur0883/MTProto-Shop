@@ -103,22 +103,38 @@ def user_card_keyboard(telegram_id: int, has_active: bool) -> InlineKeyboardMark
                 callback_data=f"admin_card_rotate:{telegram_id}",
             )
         ],
+        [
+            InlineKeyboardButton(
+                text="❌ Отключить и удалить ключ",
+                callback_data=f"admin_card_disable:{telegram_id}",
+            )
+        ],
+        [
+            InlineKeyboardButton(
+                text="🗑 Удалить полностью",
+                callback_data=f"admin_card_delete:{telegram_id}",
+            )
+        ],
     ]
-
-    if has_active:
-        buttons.append(
-            [
-                InlineKeyboardButton(
-                    text="❌ Отключить",
-                    callback_data=f"admin_card_disable:{telegram_id}",
-                )
-            ]
-        )
 
     buttons.append(
         [InlineKeyboardButton(text="⬅️ К списку", callback_data="admin_users_back")]
     )
     return InlineKeyboardMarkup(inline_keyboard=buttons)
+
+
+def confirm_delete_keyboard(telegram_id: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="⚠️ Да, удалить навсегда",
+                    callback_data=f"admin_card_delete_yes:{telegram_id}",
+                )
+            ],
+            [InlineKeyboardButton(text="⬅️ Отмена", callback_data=f"admin_user:{telegram_id}")],
+        ]
+    )
 
 
 def tariff_keyboard(action: str) -> InlineKeyboardMarkup:

@@ -79,7 +79,7 @@ async def send_support_request(message: Message, user_override: User | None = No
 
     if url:
         await message.answer(
-            "💬 Поддержка\n\n"
+            "<b>💬 Поддержка</b>\n\n"
             "Нажмите кнопку ниже, чтобы открыть чат с поддержкой.",
             reply_markup=support_keyboard(url),
         )
@@ -91,7 +91,7 @@ async def send_support_request(message: Message, user_override: User | None = No
 
         await message.bot.send_message(
             settings.admin_id,
-            "💬 Новое обращение в поддержку\n\n"
+            "<b>💬 Новое обращение в поддержку</b>\n\n"
             f"👤 Клиент: {escape(full_name)}\n"
             f"🔗 Username: {escape(username)}\n"
             f"🆔 Telegram ID: <code>{user.id}</code>\n\n"
@@ -99,7 +99,7 @@ async def send_support_request(message: Message, user_override: User | None = No
         )
 
         await message.answer(
-            "✅ Заявка отправлена\n\n"
+            "<b>✅ Заявка отправлена</b>\n\n"
             "Администратор получил ваше обращение и скоро свяжется с вами.",
             reply_markup=client_menu(),
         )
@@ -125,18 +125,55 @@ async def start(message: Message) -> None:
         full_name=user.full_name,
     )
 
-    await message.answer(
-        "👋 Добро пожаловать в MTProto\n\n"
-        "Выберите действие в меню ниже:",
-        reply_markup=client_menu(),
+    latest = await get_latest_subscription_by_telegram_id(
+        settings.database_path,
+        user.id,
     )
+    full_name = escape(user.full_name)
+
+    if (
+        latest is not None
+        and latest["status"] == ACTIVE_STATUS
+        and from_db_datetime(latest["expires_at"]) > utc_now()
+    ):
+        text = (
+            f"<b>👋 С возвращением, {full_name}!</b>\n\n"
+            "✅ Доступ активен\n"
+            f"⏳ Осталось дней: {days_left(latest['expires_at'])} "
+            f"(до {format_datetime(latest['expires_at'])})\n\n"
+            "Выберите действие:"
+        )
+    elif latest is not None:
+        text = (
+            f"<b>👋 С возвращением, {full_name}.</b>\n\n"
+            "🔒 Ваш доступ неактивен.\n"
+            "🚀 Нажмите Купить доступ, чтобы продлить.\n\n"
+            "Выберите действие:"
+        )
+    else:
+        text = (
+            "<b>👋 Добро пожаловать в MTProto Shop</b>\n\n"
+            "🔐 Личный MTProto-доступ через Telegram-прокси.\n"
+            "🎁 1 день бесплатно — попробуйте сейчас.\n\n"
+            "Доступные тарифы:\n"
+            "• 🎁 1 день — бесплатно\n"
+            "• 🗓 1 месяц — 50 ₽\n"
+            "• 🗓 3/6/12 месяцев — скоро\n\n"
+            "Нажмите 🚀 Купить доступ, чтобы начать."
+        )
+
+    await message.answer(text, reply_markup=client_menu())
 
 
 @router.message(F.text == BUY_BUTTON)
 async def buy_access(message: Message) -> None:
     await message.answer(
-        "🚀 Купить доступ\n\n"
-        "Выберите подходящий тариф:",
+        "<b>🚀 Покупка доступа</b>\n\n"
+        "Выберите тариф:\n\n"
+        "🎁 1 день — бесплатно (пробный)\n"
+        "🗓 1 месяц — 50 ₽\n"
+        "🗓 3/6/12 месяцев — в разработке\n\n"
+        "Цены указаны в рублях.",
         reply_markup=client_tariff_keyboard(),
     )
 
@@ -259,9 +296,10 @@ async def choose_client_tariff(callback: CallbackQuery) -> None:
 
     await callback.answer("Доступ выдан")
     await message.answer(
-        "✅ Доступ активирован\n\n"
+        "<b>🎉 Доступ активирован!</b>\n\n"
         f"📦 Тариф: {escape(tariff.title)}\n"
-        f"⏳ Действует до: {format_datetime(subscription['expires_at'])}",
+        f"⏳ Действует до: {format_datetime(subscription['expires_at'])}\n\n"
+        "Нажмите кнопку ниже, чтобы подключиться.",
         reply_markup=connect_keyboard(link),
     )
 
@@ -280,8 +318,8 @@ async def my_link(message: Message) -> None:
 
     if subscription is None or not subscription.get("secret"):
         await message.answer(
-            "🔒 Доступ пока не активен\n\n"
-            "Нажмите «🚀 Купить доступ» и выберите тариф.",
+            "<b>🔒 Доступ пока не активен</b>\n\n"
+            "🎁 Попробуйте 1 день бесплатно — нажмите 🚀 Купить доступ.",
             reply_markup=client_menu(),
         )
         return
@@ -293,8 +331,10 @@ async def my_link(message: Message) -> None:
     )
 
     await message.answer(
-        "🔐 Ваш доступ готов\n\n"
-        f"⏳ Действует до: {format_datetime(subscription['expires_at'])}",
+        "<b>🔐 Ваш доступ готов</b>\n\n"
+        f"⏳ Действует до: {format_datetime(subscription['expires_at'])}\n"
+        f"✅ Осталось дней: {days_left(subscription['expires_at'])}\n\n"
+        "Нажмите кнопку ниже, чтобы подключиться.",
         reply_markup=connect_keyboard(link),
     )
 
@@ -319,10 +359,19 @@ async def show_days_left(message: Message) -> None:
         )
         return
 
+    tariff_days = subscription["tariff_days"]
+    dl = days_left(subscription["expires_at"])
+    used = max(0, tariff_days - dl)
+    filled = min(10, used * 10 // max(1, tariff_days))
+    bar = "█" * filled + "░" * (10 - filled)
+    percent = filled * 10
+
     await message.answer(
-        "⏳ Срок доступа\n\n"
-        f"📅 Дата окончания: {format_datetime(subscription['expires_at'])}\n"
-        f"✅ Осталось дней: {days_left(subscription['expires_at'])}",
+        "<b>⏳ Срок доступа</b>\n\n"
+        f"📅 Истекает: {format_datetime(subscription['expires_at'])}\n"
+        f"✅ Осталось дней: {dl}\n\n"
+        f"[<code>{bar}</code>] {percent}% использовано\n\n"
+        "Хотите продлить заранее? Нажмите 🚀 Купить доступ.",
         reply_markup=client_menu(),
     )
 

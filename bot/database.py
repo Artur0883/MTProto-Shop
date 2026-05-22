@@ -307,6 +307,20 @@ async def mark_subscription_status(
         await db.commit()
 
 
+async def delete_user_cascade(database_path: Path, telegram_id: int) -> None:
+    async with open_db(database_path) as db:
+        await db.execute(
+            "DELETE FROM subscriptions WHERE user_id = "
+            "(SELECT id FROM users WHERE telegram_id = ?)",
+            (telegram_id,),
+        )
+        await db.execute(
+            "DELETE FROM users WHERE telegram_id = ?",
+            (telegram_id,),
+        )
+        await db.commit()
+
+
 async def disable_subscription_by_telegram_id(
     database_path: Path,
     telegram_id: int,
