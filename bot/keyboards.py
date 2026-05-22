@@ -89,6 +89,38 @@ def support_keyboard(url: str) -> InlineKeyboardMarkup:
     )
 
 
+def user_card_keyboard(telegram_id: int, has_active: bool) -> InlineKeyboardMarkup:
+    buttons = [
+        [
+            InlineKeyboardButton(
+                text="🔁 Продлить",
+                callback_data=f"admin_card_extend:{telegram_id}",
+            )
+        ],
+        [
+            InlineKeyboardButton(
+                text="🔄 Обновить ключ",
+                callback_data=f"admin_card_rotate:{telegram_id}",
+            )
+        ],
+    ]
+
+    if has_active:
+        buttons.append(
+            [
+                InlineKeyboardButton(
+                    text="❌ Отключить",
+                    callback_data=f"admin_card_disable:{telegram_id}",
+                )
+            ]
+        )
+
+    buttons.append(
+        [InlineKeyboardButton(text="⬅️ К списку", callback_data="admin_users_back")]
+    )
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
+
+
 def tariff_keyboard(action: str) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
