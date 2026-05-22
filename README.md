@@ -163,6 +163,23 @@ docker compose logs --tail=50 mtproto
 - GitHub README: https://github.com/alexbers/mtprotoproxy
 - GitHub source: https://github.com/alexbers/mtprotoproxy/blob/stable/mtprotoproxy.py
 
+### Troubleshooting
+
+Если в логах `mtproto` есть ошибка доступа к config:
+
+```text
+PermissionError: [Errno 13] Permission denied: '/home/tgproxy/config/config.py'
+```
+
+Исправьте права runtime config на host-системе и перезапустите proxy:
+
+```bash
+chmod 644 proxy/config/config.py
+docker compose restart mtproto
+```
+
+`bot/proxy_manager.py` автоматически выставляет `0644` после создания `config.py` из шаблона и после каждой записи `create/delete`.
+
 ### Ограничения Milestone 0
 
 - нет оплаты;

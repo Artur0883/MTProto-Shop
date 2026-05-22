@@ -21,8 +21,13 @@ def get_example_config_path(config_path: Path) -> Path:
     return config_path.with_name("config.example.py")
 
 
+def set_runtime_config_permissions(config_path: Path) -> None:
+    os.chmod(config_path, 0o644)
+
+
 def ensure_runtime_config(config_path: Path) -> None:
     if config_path.exists():
+        set_runtime_config_permissions(config_path)
         return
 
     example_path = get_example_config_path(config_path)
@@ -33,6 +38,7 @@ def ensure_runtime_config(config_path: Path) -> None:
 
     config_path.parent.mkdir(parents=True, exist_ok=True)
     shutil.copyfile(example_path, config_path)
+    set_runtime_config_permissions(config_path)
     logging.info("Created runtime proxy config from template: %s", config_path)
 
 
@@ -86,6 +92,7 @@ TLS_DOMAIN = os.getenv("TLS_DOMAIN", "www.google.com")
 
     if os.name == "nt":
         config_path.write_text(content, encoding="utf-8", newline="\n")
+        set_runtime_config_permissions(config_path)
         return
 
     fd, tmp_name = tempfile.mkstemp(
@@ -100,6 +107,7 @@ TLS_DOMAIN = os.getenv("TLS_DOMAIN", "www.google.com")
         with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as tmp_file:
             tmp_file.write(content)
         os.replace(tmp_path, config_path)
+        set_runtime_config_permissions(config_path)
     finally:
         if tmp_path.exists():
             tmp_path.unlink()
