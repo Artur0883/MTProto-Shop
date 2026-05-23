@@ -2,6 +2,7 @@ import os
 import re
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Literal, cast
 
 
 TOKEN_LIKE_RE = re.compile(r"^\d{5,}:[A-Za-z0-9_-]{20,}$")
@@ -48,6 +49,7 @@ class Settings:
     proxy_config_path: Path
     database_path: Path
     support_contact: str
+    PAYMENT_MODE: Literal["manual", "stars", "crypto", "auto_free"]
     test_auto_issue_access: bool
 
 
@@ -57,6 +59,9 @@ def get_settings() -> Settings:
     bot_token = os.getenv("BOT_TOKEN", "").strip()
     admin_id_raw = os.getenv("ADMIN_ID", "").strip()
     admin_id = int(admin_id_raw) if admin_id_raw else None
+    payment_mode = os.getenv("PAYMENT_MODE", "manual").strip().lower()
+    if payment_mode not in {"manual", "stars", "crypto", "auto_free"}:
+        payment_mode = "manual"
 
     return Settings(
         bot_token=bot_token,
@@ -71,8 +76,9 @@ def get_settings() -> Settings:
             os.getenv("SUPPORT_CONTACT", ""),
             bot_token,
         ),
+        PAYMENT_MODE=cast(Literal["manual", "stars", "crypto", "auto_free"], payment_mode),
         test_auto_issue_access=parse_bool(
-            os.getenv("TEST_AUTO_ISSUE_ACCESS"),
-            default=True,
+            os.getenv("DEV_AUTO_ISSUE"),
+            default=False,
         ),
     )

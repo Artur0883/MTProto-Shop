@@ -67,6 +67,39 @@ def client_tariff_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
 
+def manual_pay_keyboard(tariff_days: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="💳 Оплатить через оператора",
+                    callback_data=f"pay_request:{tariff_days}",
+                )
+            ],
+            [InlineKeyboardButton(text=BACK_BUTTON, callback_data="client_back")],
+        ]
+    )
+
+
+def admin_pay_request_keyboard(telegram_id: int, days: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="✅ Подтвердить — выдать доступ",
+                    callback_data=f"admin_payapprove:{telegram_id}:{days}",
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="❌ Отклонить",
+                    callback_data=f"admin_payreject:{telegram_id}:{days}",
+                )
+            ],
+        ]
+    )
+
+
 def connect_keyboard(link: str) -> InlineKeyboardMarkup:
     if link.startswith("tg://proxy?"):
         button_url = "https://t.me/proxy?" + link.split("?", 1)[1]

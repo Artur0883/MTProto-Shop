@@ -32,6 +32,7 @@ from keyboards import (
     STATS_BUTTON,
     USERS_BUTTON,
     admin_menu,
+    client_menu,
     confirm_delete_keyboard,
     connect_keyboard,
     tariff_keyboard,
@@ -46,7 +47,7 @@ from proxy_manager import (
     mask_secret,
     rotate_secret,
 )
-from tariffs import get_tariff
+from tariffs import Tariff, get_tariff
 
 
 router = Router()
@@ -122,6 +123,48 @@ def format_db_datetime(value: str | None) -> str:
     if not value:
         return "-"
     return from_db_datetime(value).strftime("%Y-%m-%d %H:%M UTC")
+
+
+async def grant_access(telegram_id: int, tariff: Tariff, action: str) -> dict:
+    settings = get_settings()
+    client_id = client_id_for(telegram_id)
+    now = utc_now()
+    latest = await get_latest_subscription_by_telegram_id(
+        settings.database_path,
+        telegram_id,
+    )
+
+    if action == "auto":
+        action = "extend" if latest else "issue"
+
+    if action == "issue":
+        secret = ensure_secret(client_id)
+        return await create_subscription(
+            settings.database_path,
+            telegram_id,
+            secret,
+            tariff.days,
+            now,
+            now + timedelta(days=tariff.days),
+        )
+
+    if action == "extend":
+        previous_secret = latest["secret"] if latest and latest["secret"] else None
+        secret = ensure_secret(client_id, previous_secret)
+        if latest and latest["status"] == ACTIVE_STATUS:
+            base = max(from_db_datetime(latest["expires_at"]), now)
+        else:
+            base = now
+        return await extend_subscription(
+            settings.database_path,
+            telegram_id,
+            secret,
+            tariff.days,
+            now,
+            base + timedelta(days=tariff.days),
+        )
+
+    raise ValueError("Неизвестное действие.")
 
 
 def render_user_card(user: dict, subscription: dict | None) -> str:
@@ -652,51 +695,18 @@ async def choose_tariff(callback: CallbackQuery, state: FSMContext, bot: Bot) ->
         return
     telegram_id = int(telegram_id_raw)
 
-    settings = get_settings()
-    client_id = client_id_for(telegram_id)
-    now = utc_now()
-    latest = await get_latest_subscription_by_telegram_id(
-        settings.database_path,
-        telegram_id,
-    )
+    if action == "issue":
+        admin_text = "Доступ выдан."
+        client_text = "Администратор выдал вам доступ."
+    elif action == "extend":
+        admin_text = "Доступ продлён."
+        client_text = "Администратор продлил ваш доступ."
+    else:
+        await callback.answer("Неизвестное действие.", show_alert=True)
+        return
 
     try:
-        if action == "issue":
-            secret = ensure_secret(client_id)
-            starts_at = now
-            expires_at = starts_at + timedelta(days=tariff.days)
-            subscription = await create_subscription(
-                settings.database_path,
-                telegram_id,
-                secret,
-                tariff.days,
-                starts_at,
-                expires_at,
-            )
-            admin_text = "Доступ выдан."
-            client_text = "Администратор выдал вам доступ."
-        elif action == "extend":
-            previous_secret = latest["secret"] if latest and latest["secret"] else None
-            secret = ensure_secret(client_id, previous_secret)
-            if latest and latest["status"] == ACTIVE_STATUS:
-                base = max(from_db_datetime(latest["expires_at"]), now)
-            else:
-                base = now
-            starts_at = now
-            expires_at = base + timedelta(days=tariff.days)
-            subscription = await extend_subscription(
-                settings.database_path,
-                telegram_id,
-                secret,
-                tariff.days,
-                starts_at,
-                expires_at,
-            )
-            admin_text = "Доступ продлён."
-            client_text = "Администратор продлил ваш доступ."
-        else:
-            await callback.answer("Неизвестное действие.", show_alert=True)
-            return
+        subscription = await grant_access(telegram_id, tariff, action)
     except Exception as exc:
         await message.answer(f"Ошибка: {escape(str(exc))}")
         await callback.answer()
@@ -725,6 +735,86 @@ async def choose_tariff(callback: CallbackQuery, state: FSMContext, bot: Bot) ->
     )
     await state.clear()
     await callback.answer()
+
+
+@router.callback_query(F.data.startswith("admin_payapprove:"))
+async def approve_payment_request(callback: CallbackQuery, bot: Bot) -> None:
+    user = callback.from_user
+    if user is None or not is_admin(user.id):
+        await callback.answer("Доступ запрещён.", show_alert=True)
+        return
+
+    message = callback.message
+    parts = (callback.data or "").split(":")
+    if len(parts) != 3 or not parts[1].isdigit() or not parts[2].isdigit():
+        await callback.answer("Некорректная заявка.", show_alert=True)
+        return
+
+    telegram_id = int(parts[1])
+    days = int(parts[2])
+    try:
+        tariff = get_tariff(days)
+        subscription = await grant_access(telegram_id, tariff, "auto")
+    except Exception as exc:
+        if message is not None and hasattr(message, "answer"):
+            await message.answer(f"Ошибка: {escape(str(exc))}")
+        await callback.answer("Не удалось выдать доступ.", show_alert=True)
+        return
+
+    link = subscription_link(subscription["secret"])
+    expires_at_text = from_db_datetime(subscription["expires_at"]).strftime(
+        "%Y-%m-%d %H:%M UTC"
+    )
+    await bot.send_message(
+        telegram_id,
+        "<b>🎉 Доступ активирован!</b>\n\n"
+        f"📦 Тариф: {escape(tariff.title)}\n"
+        f"⏳ Действует до: {expires_at_text}\n\n"
+        "Нажмите кнопку ниже, чтобы подключиться.",
+        reply_markup=connect_keyboard(link),
+    )
+
+    admin_text = (
+        "✅ Доступ выдан\n\n"
+        f"Пользователь: {telegram_id}\n"
+        f"Тариф: {tariff.title}\n"
+        f"Срок до: {expires_at_text}\n\n"
+        "Чтобы изменения вступили в силу на proxy, выполните на host-системе:\n"
+        "docker compose kill -s SIGUSR2 mtproto\n"
+        "fallback: docker compose restart mtproto"
+    )
+    if message is not None and hasattr(message, "edit_text"):
+        await message.edit_text(admin_text)
+    elif message is not None and hasattr(message, "answer"):
+        await message.answer(admin_text, reply_markup=admin_menu())
+    await callback.answer("Доступ выдан")
+
+
+@router.callback_query(F.data.startswith("admin_payreject:"))
+async def reject_payment_request(callback: CallbackQuery, bot: Bot) -> None:
+    user = callback.from_user
+    if user is None or not is_admin(user.id):
+        await callback.answer("Доступ запрещён.", show_alert=True)
+        return
+
+    message = callback.message
+    parts = (callback.data or "").split(":")
+    if len(parts) != 3 or not parts[1].isdigit() or not parts[2].isdigit():
+        await callback.answer("Некорректная заявка.", show_alert=True)
+        return
+
+    telegram_id = int(parts[1])
+    await bot.send_message(
+        telegram_id,
+        "К сожалению, заявка отклонена. Свяжитесь с поддержкой",
+        reply_markup=client_menu(),
+    )
+
+    if message is not None and hasattr(message, "edit_text"):
+        await message.edit_text("❌ Заявка отклонена")
+    elif message is not None and hasattr(message, "answer"):
+        await message.answer("❌ Заявка отклонена", reply_markup=admin_menu())
+    await callback.answer("Заявка отклонена")
 
 
 @router.message(F.text == ROTATE_ACCESS_BUTTON)

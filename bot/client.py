@@ -23,9 +23,11 @@ from keyboards import (
     OLD_DAYS_LEFT_BUTTON,
     OLD_MY_LINK_BUTTON,
     SUPPORT_BUTTON,
+    admin_pay_request_keyboard,
     client_menu,
     client_tariff_keyboard,
     connect_keyboard,
+    manual_pay_keyboard,
     support_keyboard,
 )
 from proxy_manager import build_proxy_link, create_secret, list_clients
@@ -208,6 +210,61 @@ async def support_inline(callback: CallbackQuery) -> None:
     await send_support_request(message, user_override=callback.from_user)
 
 
+@router.callback_query(F.data.startswith("pay_request:"))
+async def pay_request(callback: CallbackQuery) -> None:
+    settings = get_settings()
+    user = callback.from_user
+    message = callback.message
+
+    if user is None:
+        await callback.answer("Не удалось определить пользователя.", show_alert=True)
+        return
+
+    if message is None or not hasattr(message, "answer"):
+        await callback.answer("Откройте меню командой /start.", show_alert=True)
+        return
+
+    parts = (callback.data or "").split(":")
+    try:
+        tariff = get_tariff(int(parts[1])) if len(parts) == 2 else None
+    except (TypeError, ValueError):
+        tariff = None
+
+    if tariff is None or tariff.price == 0:
+        await callback.answer("Тариф не найден.", show_alert=True)
+        return
+
+    if settings.admin_id is None:
+        await callback.answer("Оператор временно недоступен.", show_alert=True)
+        await message.answer(
+            "Не удалось отправить заявку. Пожалуйста, свяжитесь с поддержкой.",
+            reply_markup=client_menu(),
+        )
+        return
+
+    username = f"@{user.username}" if user.username else "-"
+    price_text = f"{tariff.price} ₽" if tariff.price is not None else "-"
+    await message.bot.send_message(
+        settings.admin_id,
+        "<b>💳 Новая заявка на оплату</b>\n\n"
+        f"👤 Клиент: {escape(user.full_name or '-')}\n"
+        f"🔗 Username: {escape(username)}\n"
+        f"🆔 Telegram ID: <code>{user.id}</code>\n"
+        f"📦 Тариф: {escape(tariff.title)}\n"
+        f"💵 Цена: {price_text}",
+        reply_markup=admin_pay_request_keyboard(user.id, tariff.days),
+    )
+
+    if hasattr(message, "edit_reply_markup"):
+        await message.edit_reply_markup(reply_markup=None)
+    await callback.answer("Заявка отправлена")
+    await message.answer(
+        "<b>✅ Заявка отправлена оператору</b>\n\n"
+        "Оператор проверит оплату и ответит в течение 5–10 минут.",
+        reply_markup=client_menu(),
+    )
+
+
 @router.callback_query(F.data.startswith("client_tariff:"))
 async def choose_client_tariff(callback: CallbackQuery) -> None:
     settings = get_settings()
@@ -240,12 +297,27 @@ async def choose_client_tariff(callback: CallbackQuery) -> None:
         full_name=user.full_name,
     )
 
-    if not settings.test_auto_issue_access:
+    is_free_trial = tariff.days == 1 and tariff.price == 0
+    auto_free_enabled = (
+        settings.PAYMENT_MODE == "auto_free" and settings.test_auto_issue_access
+    )
+
+    if not is_free_trial and not auto_free_enabled:
+        payment_notice = ""
+        if settings.PAYMENT_MODE in {"stars", "crypto"}:
+            payment_notice = (
+                "💳 Этот способ оплаты пока в разработке — временно через оператора.\n\n"
+            )
+
         await callback.answer()
         await message.answer(
-            "💳 Оплата пока подключается\n\n"
-            "Нажмите кнопку поддержки, чтобы получить доступ через администратора.",
-            reply_markup=client_menu(),
+            payment_notice
+            + f"<b>📦 Тариф: {escape(tariff.title)}</b>\n\n"
+            f"Что вы получаете: личный приватный MTProto-ключ на {tariff.days} дней, "
+            "отдельный от других клиентов.\n"
+            "Оплата: через оператора, ответ 5–10 минут.\n\n"
+            "Нажмите кнопку ниже, чтобы оформить.",
+            reply_markup=manual_pay_keyboard(tariff.days),
         )
         return
 
