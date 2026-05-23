@@ -3,6 +3,8 @@ from datetime import UTC, datetime, timedelta
 from html import escape
 import logging
 from pathlib import Path
+import shutil
+import socket
 
 from aiogram import Bot, F, Router
 from aiogram.exceptions import TelegramForbiddenError
@@ -35,6 +37,7 @@ from keyboards import (
     REBOOT_BUTTON,
     ROTATE_ACCESS_BUTTON,
     STATS_BUTTON,
+    STATUS_BUTTON,
     USERS_BUTTON,
     admin_menu,
     client_menu,
@@ -52,6 +55,7 @@ from proxy_manager import (
     mask_secret,
     rotate_secret,
 )
+import runtime
 from tariffs import Tariff, get_tariff
 
 
@@ -65,10 +69,86 @@ SIGUSR2_NOTICE = (
 )
 RESTART_REQUEST_PATH = Path("/app/data/restart.request")
 RESTART_COOLDOWN_SEC = 60
+SUPPORT_HEARTBEAT = Path("/app/data/heartbeats/support_bot.beat")
+WATCHER_HEARTBEAT = Path("/app/data/heartbeats/watcher.beat")
+RESTART_LOG = Path("/app/data/restart.log")
 
 
 def access_disabled_text(note: str = "") -> str:
     return f"✅ <b>Доступ отключён</b>{note}\n\n" + SIGUSR2_NOTICE
+
+
+def _format_uptime(delta_seconds: float) -> str:
+    s = int(delta_seconds)
+    d, s = divmod(s, 86400)
+    h, s = divmod(s, 3600)
+    m, _ = divmod(s, 60)
+    if d:
+        return f"{d} д {h} ч"
+    if h:
+        return f"{h} ч {m} мин"
+    return f"{m} мин"
+
+
+def _format_ago(delta_seconds: float) -> str:
+    s = int(delta_seconds)
+    if s < 60:
+        return f"{s} сек назад"
+    if s < 3600:
+        return f"{s // 60} мин назад"
+    if s < 86400:
+        return f"{s // 3600} ч назад"
+    return f"{s // 86400} д назад"
+
+
+async def _check_proxy(host: str, port: int, timeout: float = 2.0) -> bool:
+    try:
+        _, writer = await asyncio.wait_for(
+            asyncio.open_connection(host, port), timeout=timeout
+        )
+        writer.close()
+        try:
+            await writer.wait_closed()
+        except Exception:
+            pass
+        return True
+    except Exception:
+        return False
+
+
+def _read_mem_mb() -> tuple[int, int] | None:
+    try:
+        data = Path("/proc/meminfo").read_text()
+        total_kb = avail_kb = None
+        for line in data.splitlines():
+            if line.startswith("MemTotal:"):
+                total_kb = int(line.split()[1])
+            elif line.startswith("MemAvailable:"):
+                avail_kb = int(line.split()[1])
+        if total_kb and avail_kb:
+            used_mb = (total_kb - avail_kb) // 1024
+            total_mb = total_kb // 1024
+            return used_mb, total_mb
+    except Exception:
+        pass
+    return None
+
+
+def _read_last_restart() -> str | None:
+    try:
+        if not RESTART_LOG.exists():
+            return None
+        lines = [
+            line
+            for line in RESTART_LOG.read_text().splitlines()
+            if "restart triggered" in line
+        ]
+        if not lines:
+            return None
+        ts = lines[-1].split("]")[0].lstrip("[")
+        return datetime.fromisoformat(ts).strftime("%d.%m.%Y %H:%M UTC")
+    except Exception:
+        return None
 
 
 class AdminStates(StatesGroup):
@@ -372,6 +452,94 @@ async def reboot_confirm(callback: CallbackQuery, bot: Bot) -> None:
                 logging.exception("Failed to notify admin about missing watcher")
 
     asyncio.create_task(check_watcher())
+
+
+@router.message(F.text == STATUS_BUTTON)
+async def system_status(message: Message) -> None:
+    if await deny_if_not_admin(message):
+        return
+    settings = get_settings()
+    now = datetime.now(UTC)
+
+    if runtime.STARTED_AT:
+        bot_up = (
+            f"✅ работает (включён "
+            f"{_format_uptime((now - runtime.STARTED_AT).total_seconds())})"
+        )
+    else:
+        bot_up = "✅ работает"
+
+    if SUPPORT_HEARTBEAT.exists():
+        age = now.timestamp() - SUPPORT_HEARTBEAT.stat().st_mtime
+        support_line = (
+            "✅ работает"
+            if age < 90
+            else f"❌ не отвечает (последний сигнал {_format_ago(age)})"
+        )
+    else:
+        support_line = "⚠️ ни разу не запускался"
+
+    proxy_ok = await _check_proxy("mtproto", settings.proxy_port)
+    proxy_line = (
+        f"✅ работает на порту {settings.proxy_port}"
+        if proxy_ok
+        else f"❌ не отвечает на порту {settings.proxy_port}"
+    )
+
+    if WATCHER_HEARTBEAT.exists():
+        age = now.timestamp() - WATCHER_HEARTBEAT.stat().st_mtime
+        if age < 30:
+            watcher_line = "✅ установлен"
+        else:
+            watcher_line = (
+                f"⚠️ не отвечает (последний сигнал {_format_ago(age)}). "
+                "Перезапустите его: systemctl restart mtproto-restart-watcher"
+            )
+    else:
+        watcher_line = (
+            "⚠️ не установлен — кнопка «Перезагрузка системы» работать не будет.\n"
+            "   Откройте на VPS: mtp → пункт 19"
+        )
+
+    stats = await get_stats(settings.database_path)
+
+    try:
+        keys_count = len(list_clients())
+    except Exception:
+        keys_count = -1
+    keys_line = f"{keys_count}" if keys_count >= 0 else "недоступно"
+
+    try:
+        usage = shutil.disk_usage("/app/data")
+        free_gb = usage.free / 1024**3
+        total_gb = usage.total / 1024**3
+        disk_line = f"{free_gb:.1f} ГБ свободно из {total_gb:.1f} ГБ"
+    except Exception:
+        disk_line = "недоступно"
+
+    mem = _read_mem_mb()
+    mem_line = f"{mem[0]} МБ занято из {mem[1]} МБ" if mem else "недоступно (не Linux)"
+
+    last_restart = _read_last_restart() or "через бота ещё не запускали"
+
+    text = (
+        "<b>🛠 Состояние сервера</b>\n\n"
+        f"🤖 Главный бот: {bot_up}\n"
+        f"💬 Бот поддержки: {support_line}\n"
+        f"🛰 MTProto-прокси: {proxy_line}\n"
+        f"🛡 Авто-перезагрузка (watcher): {watcher_line}\n\n"
+        "<b>📊 Клиенты и подписки</b>\n"
+        f"   👥 Всего клиентов: {stats['total_users']}\n"
+        f"   ✅ Активных подписок: {stats['active']}\n"
+        f"   ⏰ Истекших: {stats['expired']}\n"
+        f"   🚫 Отключённых: {stats['disabled']}\n"
+        f"   🔑 Ключей в proxy-конфиге: {keys_line}\n\n"
+        f"💾 Диск VPS: {disk_line}\n"
+        f"🧠 Память VPS: {mem_line}\n"
+        f"📡 Адрес сервера: {settings.server_host}:{settings.proxy_port}\n\n"
+        f"🕐 Последний рестарт через бота: {last_restart}"
+    )
+    await message.answer(text, reply_markup=admin_menu())
 
 
 @router.message(F.text == USERS_BUTTON)

@@ -1,4 +1,5 @@
 import asyncio
+from datetime import UTC, datetime
 import logging
 import sys
 
@@ -11,6 +12,7 @@ from client import router as client_router
 from config import get_settings
 from database import init_db
 from proxy_manager import ensure_runtime_config
+import runtime
 from subscriptions import subscription_worker
 
 
@@ -43,6 +45,7 @@ async def main() -> None:
 
     async def on_startup() -> None:
         nonlocal worker_task
+        runtime.STARTED_AT = datetime.now(UTC)
         worker_task = asyncio.create_task(subscription_worker(bot))
         logging.info("Telegram Bot MVP is running")
 

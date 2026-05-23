@@ -17,6 +17,7 @@ EXTEND_ACCESS_BUTTON = "🔁 Продлить доступ"
 ROTATE_ACCESS_BUTTON = "🔄 Обновить ключ"
 DISABLE_ACCESS_BUTTON = "❌ Отключить доступ"
 STATS_BUTTON = "📊 Статистика"
+STATUS_BUTTON = "🛡 Состояние системы"
 REBOOT_BUTTON = "🔁 Перезагрузка системы"
 BACK_BUTTON = "⬅️ Назад"
 
@@ -40,6 +41,7 @@ def admin_menu() -> ReplyKeyboardMarkup:
             [KeyboardButton(text=ISSUE_ACCESS_BUTTON), KeyboardButton(text=EXTEND_ACCESS_BUTTON)],
             [KeyboardButton(text=ROTATE_ACCESS_BUTTON), KeyboardButton(text=DISABLE_ACCESS_BUTTON)],
             [KeyboardButton(text=STATS_BUTTON)],
+            [KeyboardButton(text=STATUS_BUTTON)],
             [KeyboardButton(text=REBOOT_BUTTON)],
         ],
         resize_keyboard=True,

@@ -1,6 +1,7 @@
 import asyncio
 from html import escape
 import logging
+from pathlib import Path
 import sys
 
 from aiogram import Bot, Dispatcher, F, Router
@@ -15,11 +16,22 @@ from database import init_db, record_support_bot_thread, resolve_support_bot_thr
 
 
 router = Router()
+HEARTBEAT_PATH = Path("/app/data/heartbeats/support_bot.beat")
 
 
 def is_admin(telegram_id: int | None) -> bool:
     settings = get_settings()
     return settings.admin_id is not None and telegram_id == settings.admin_id
+
+
+async def heartbeat_loop() -> None:
+    HEARTBEAT_PATH.parent.mkdir(parents=True, exist_ok=True)
+    while True:
+        try:
+            HEARTBEAT_PATH.touch()
+        except Exception:
+            logging.exception("support_bot heartbeat failed")
+        await asyncio.sleep(30)
 
 
 async def relay_client_to_admin(message: Message) -> None:
@@ -127,6 +139,7 @@ async def main() -> None:
         logging.warning("ADMIN_ID is not set; support relay is unavailable")
 
     await init_db(settings.database_path)
+    asyncio.create_task(heartbeat_loop())
     bot = Bot(
         token=settings.support_bot_token,
         default=DefaultBotProperties(parse_mode=ParseMode.HTML),
