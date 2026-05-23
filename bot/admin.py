@@ -250,7 +250,7 @@ def users_keyboard(rows: list[dict]) -> InlineKeyboardMarkup:
     )
 
 
-@router.message(F.reply_to_message)
+@router.message(F.reply_to_message, F.text)
 async def admin_reply_to_client(message: Message, bot: Bot) -> None:
     user = message.from_user
     if user is None or not is_admin(user.id):
@@ -261,8 +261,14 @@ async def admin_reply_to_client(message: Message, bot: Bot) -> None:
         reply_id = message.reply_to_message.message_id
         client_id = await resolve_support_thread(settings.database_path, reply_id)
         if client_id is None:
+            await message.answer(
+                "⚠️ Не нашёл диалог с клиентом для этого reply.\n\n"
+                "Ответьте свайпом на сообщение клиента (с username и Telegram ID). "
+                "Старые сообщения могли быть забыты после рестарта бота."
+            )
             return
 
+        logging.info("admin reply resolved client_id=%s reply_to=%s", client_id, reply_id)
         await bot.copy_message(
             chat_id=client_id,
             from_chat_id=message.chat.id,

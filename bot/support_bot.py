@@ -32,9 +32,14 @@ async def relay_client_to_admin(message: Message) -> None:
 
     try:
         username = f"@{escape(user.username)}" if user.username else "без username"
-        await message.bot.send_message(
+        header_msg = await message.bot.send_message(
             settings.admin_id,
             f"💬 От клиента {escape(user.full_name)} {username} · ID <code>{user.id}</code>",
+        )
+        await record_support_bot_thread(
+            settings.database_path,
+            header_msg.message_id,
+            user.id,
         )
         copied_message = await message.bot.copy_message(
             chat_id=settings.admin_id,
@@ -67,7 +72,7 @@ async def start(message: Message) -> None:
     )
 
 
-@router.message(F.reply_to_message, F.text)
+@router.message(F.reply_to_message)
 async def relay_reply(message: Message, bot: Bot) -> None:
     user = message.from_user
     if user is None:
@@ -81,8 +86,14 @@ async def relay_reply(message: Message, bot: Bot) -> None:
         reply_id = message.reply_to_message.message_id
         client_id = await resolve_support_bot_thread(settings.database_path, reply_id)
         if client_id is None:
+            await message.answer(
+                "⚠️ Не нашёл диалог с клиентом для этого reply.\n\n"
+                "Ответьте свайпом на сообщение клиента (с username и Telegram ID). "
+                "Старые сообщения могли быть забыты после рестарта бота."
+            )
             return
 
+        logging.info("admin reply resolved client_id=%s reply_to=%s", client_id, reply_id)
         await bot.copy_message(
             chat_id=client_id,
             from_chat_id=message.chat.id,

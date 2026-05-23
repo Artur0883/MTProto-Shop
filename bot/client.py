@@ -486,9 +486,14 @@ async def relay_client_to_admin(message: Message) -> None:
             return
 
         username = f"@{escape(user.username)}" if user.username else "без username"
-        await message.bot.send_message(
+        header_msg = await message.bot.send_message(
             settings.admin_id,
             f"💬 От клиента {escape(user.full_name)} {username} · ID <code>{user.id}</code>",
+        )
+        await record_support_thread(
+            settings.database_path,
+            header_msg.message_id,
+            user.id,
         )
         copied_message = await message.bot.copy_message(
             chat_id=settings.admin_id,
