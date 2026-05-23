@@ -48,7 +48,7 @@ from keyboards import (
 )
 from proxy_manager import (
     ClientNotFoundError,
-    build_proxy_link,
+    build_tls_proxy_link,
     create_secret,
     delete_secret,
     list_clients,
@@ -186,7 +186,12 @@ def ensure_secret(client_id: str, preferred_secret: str | None = None) -> str:
 
 def subscription_link(secret: str) -> str:
     settings = get_settings()
-    return build_proxy_link(settings.server_host, settings.proxy_port, secret)
+    return build_tls_proxy_link(
+        settings.server_host,
+        settings.proxy_port,
+        secret,
+        settings.tls_domain,
+    )
 
 
 def parse_telegram_id(text: str | None) -> int:

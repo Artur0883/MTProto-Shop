@@ -47,6 +47,7 @@ class Settings:
     admin_id: int | None
     server_host: str
     proxy_port: int
+    tls_domain: str
     proxy_config_path: Path
     database_path: Path
     support_contact: str
@@ -70,6 +71,7 @@ def get_settings() -> Settings:
         admin_id=admin_id,
         server_host=os.getenv("SERVER_HOST", "SERVER_HOST"),
         proxy_port=int(os.getenv("PROXY_PORT", "443")),
+        tls_domain=os.getenv("TLS_DOMAIN", "www.cloudflare.com").strip(),
         proxy_config_path=Path(
             os.getenv("PROXY_CONFIG_PATH", "proxy/config/config.py")
         ),

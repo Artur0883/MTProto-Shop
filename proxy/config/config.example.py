@@ -7,7 +7,7 @@ USERS = {}
 MODES = {
     "classic": False,
     "secure": True,
-    "tls": False,
+    "tls": True,
 }
 
-TLS_DOMAIN = os.getenv("TLS_DOMAIN", "www.google.com")
+TLS_DOMAIN = os.getenv("TLS_DOMAIN", "www.cloudflare.com")

@@ -47,7 +47,7 @@ from keyboards import (
     support_keyboard,
     try_or_buy_keyboard,
 )
-from proxy_manager import build_proxy_link, create_secret, list_clients, rotate_secret
+from proxy_manager import build_tls_proxy_link, create_secret, list_clients, rotate_secret
 from tariffs import Tariff, get_tariff
 
 
@@ -164,10 +164,11 @@ async def issue_access(telegram_id: int, tariff: Tariff) -> dict:
 
 async def send_granted_access(message: Message, tariff: Tariff, subscription: dict) -> None:
     settings = get_settings()
-    link = build_proxy_link(
+    link = build_tls_proxy_link(
         settings.server_host,
         settings.proxy_port,
         subscription["secret"],
+        settings.tls_domain,
     )
     await message.answer(
         "<b>🎉 Доступ активирован!</b>\n\n"
@@ -589,10 +590,11 @@ async def send_my_link(message: Message, telegram_id: int) -> None:
         )
         return
 
-    link = build_proxy_link(
+    link = build_tls_proxy_link(
         settings.server_host,
         settings.proxy_port,
         subscription["secret"],
+        settings.tls_domain,
     )
 
     await message.answer(
@@ -722,10 +724,16 @@ async def rotate_client_key(callback: CallbackQuery) -> None:
         await callback.answer("Не удалось обновить ключ.", show_alert=True)
         return
 
-    link = build_proxy_link(settings.server_host, settings.proxy_port, secret)
+    link = build_tls_proxy_link(
+        settings.server_host,
+        settings.proxy_port,
+        secret,
+        settings.tls_domain,
+    )
     await callback.answer("Ключ обновлён")
     await message.answer(
-        "🔄 Ключ обновлён. Старый перестанет работать в течение ~5 секунд.",
+        "🔄 Ключ обновлён. Старый перестанет работать в течение ~5 секунд.\n\n"
+        "Новая ссылка использует TLS-маскировку — должна подключаться быстрее.",
         reply_markup=connect_keyboard(link),
     )
 

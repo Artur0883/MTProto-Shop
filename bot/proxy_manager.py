@@ -17,6 +17,7 @@ from config import get_settings
 SECRET_RE = re.compile(r"^[0-9a-f]{32}$")
 CLIENT_RE = re.compile(r"^[A-Za-z0-9_.-]{1,64}$")
 SECURE_SECRET_PREFIX = "dd"
+TLS_SECRET_PREFIX = "ee"  # ee + 32 hex client secret + hex(UTF-8 TLS domain)
 
 
 class ClientNotFoundError(ValueError):
@@ -106,10 +107,10 @@ USERS = {users_block}
 MODES = {{
     "classic": False,
     "secure": True,
-    "tls": False,
+    "tls": True,
 }}
 
-TLS_DOMAIN = os.getenv("TLS_DOMAIN", "www.google.com")
+TLS_DOMAIN = os.getenv("TLS_DOMAIN", "www.cloudflare.com")
 '''
 
     if os.name == "nt":
@@ -148,6 +149,21 @@ def validate_secret(secret: str) -> None:
 
 def build_proxy_link(server_host: str, proxy_port: int, secret: str) -> str:
     public_secret = f"{SECURE_SECRET_PREFIX}{secret}"
+    params = urlencode(
+        {
+            "server": server_host,
+            "port": str(proxy_port),
+            "secret": public_secret,
+        }
+    )
+    return f"tg://proxy?{params}"
+
+
+def build_tls_proxy_link(
+    server_host: str, proxy_port: int, secret: str, tls_domain: str
+) -> str:
+    domain_hex = tls_domain.encode("utf-8").hex()
+    public_secret = f"{TLS_SECRET_PREFIX}{secret}{domain_hex}"
     params = urlencode(
         {
             "server": server_host,
@@ -244,7 +260,12 @@ def get_link(client_id: str) -> str:
     if client_id not in users:
         raise ClientNotFoundError(f"client '{client_id}' not found")
 
-    return build_proxy_link(settings.server_host, settings.proxy_port, users[client_id])
+    return build_tls_proxy_link(
+        settings.server_host,
+        settings.proxy_port,
+        users[client_id],
+        settings.tls_domain,
+    )
 
 
 def list_clients() -> dict[str, str]:
