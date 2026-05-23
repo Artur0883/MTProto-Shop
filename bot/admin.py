@@ -63,9 +63,9 @@ router = Router()
 
 
 SIGUSR2_NOTICE = (
-    "<b>⚠️ Чтобы клиент потерял соединение прямо сейчас:</b>\n"
-    "1. Откройте <code>mtp</code> → пункт <b>11</b> (♻️ Применить изменения proxy)\n"
-    "Или вручную: <code>docker compose kill -s SIGUSR2 mtproto</code>"
+    "✅ Изменения proxy применяются автоматически в течение ~5 секунд.\n"
+    "Если watcher не установлен (mtp → 19), запустите вручную: "
+    "<code>docker compose kill -s SIGUSR2 mtproto</code>"
 )
 RESTART_REQUEST_PATH = Path("/app/data/restart.request")
 RESTART_COOLDOWN_SEC = 60
@@ -716,9 +716,7 @@ async def admin_card_rotate(callback: CallbackQuery, bot: Bot) -> None:
             "Ключ обновлён.\n\n"
             f"Пользователь: {telegram_id}\n"
             f"Срок до: {expires_at_text}\n\n"
-            "Чтобы изменения вступили в силу на proxy, выполните на host-системе:\n"
-            "docker compose kill -s SIGUSR2 mtproto\n"
-            "fallback: docker compose restart mtproto"
+            "✅ Ключ применится автоматически в течение ~5 секунд."
         )
     await edit_user_card(callback, telegram_id)
 
@@ -1004,9 +1002,7 @@ async def choose_tariff(callback: CallbackQuery, state: FSMContext, bot: Bot) ->
         f"Пользователь: {telegram_id}\n"
         f"Тариф: {tariff.title}\n"
         f"Срок до: {expires_at_text}\n\n"
-        "Чтобы изменения вступили в силу на proxy, выполните на host-системе:\n"
-        "docker compose kill -s SIGUSR2 mtproto\n"
-        "fallback: docker compose restart mtproto",
+        "✅ Ключ применится автоматически в течение ~5 секунд.",
         reply_markup=admin_menu(),
     )
     await state.clear()
@@ -1055,9 +1051,7 @@ async def approve_payment_request(callback: CallbackQuery, bot: Bot) -> None:
         f"Пользователь: {telegram_id}\n"
         f"Тариф: {tariff.title}\n"
         f"Срок до: {expires_at_text}\n\n"
-        "Чтобы изменения вступили в силу на proxy, выполните на host-системе:\n"
-        "docker compose kill -s SIGUSR2 mtproto\n"
-        "fallback: docker compose restart mtproto"
+        "✅ Ключ применится автоматически в течение ~5 секунд."
     )
     if message is not None and hasattr(message, "edit_text"):
         await message.edit_text(admin_text)
@@ -1174,9 +1168,7 @@ async def rotate_user_id(message: Message, state: FSMContext, bot: Bot) -> None:
         "Ключ обновлён.\n\n"
         f"Пользователь: {telegram_id}\n"
         f"Срок до: {expires_at_text}\n\n"
-        "Чтобы изменения вступили в силу на proxy, выполните на host-системе:\n"
-        "docker compose kill -s SIGUSR2 mtproto\n"
-        "fallback: docker compose restart mtproto",
+        "✅ Ключ применится автоматически в течение ~5 секунд.",
         reply_markup=admin_menu(),
     )
     await state.clear()

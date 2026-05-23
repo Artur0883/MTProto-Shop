@@ -7,6 +7,7 @@ import runpy
 import secrets
 import shutil
 import tempfile
+from datetime import UTC, datetime
 from pathlib import Path
 from urllib.parse import urlencode
 
@@ -68,6 +69,16 @@ def load_users(config_path: Path) -> dict[str, str]:
     return {str(name): str(secret).lower() for name, secret in users.items()}
 
 
+def request_proxy_reload() -> None:
+    try:
+        settings = get_settings()
+        sentinel_path = settings.database_path.parent / "proxy.reload.request"
+        sentinel_path.parent.mkdir(parents=True, exist_ok=True)
+        sentinel_path.write_text(datetime.now(UTC).isoformat(), encoding="utf-8")
+    except Exception as exc:
+        logging.warning("proxy reload sentinel not written: %s", exc)
+
+
 def write_config(config_path: Path, users: dict[str, str]) -> None:
     ensure_runtime_config(config_path)
     config_path.parent.mkdir(parents=True, exist_ok=True)
@@ -98,24 +109,25 @@ TLS_DOMAIN = os.getenv("TLS_DOMAIN", "www.google.com")
     if os.name == "nt":
         config_path.write_text(content, encoding="utf-8", newline="\n")
         set_runtime_config_permissions(config_path)
-        return
+    else:
+        fd, tmp_name = tempfile.mkstemp(
+            prefix="tmp",
+            suffix=".py",
+            dir=str(config_path.parent),
+            text=True,
+        )
+        tmp_path = Path(tmp_name)
 
-    fd, tmp_name = tempfile.mkstemp(
-        prefix="tmp",
-        suffix=".py",
-        dir=str(config_path.parent),
-        text=True,
-    )
-    tmp_path = Path(tmp_name)
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as tmp_file:
+                tmp_file.write(content)
+            os.replace(tmp_path, config_path)
+            set_runtime_config_permissions(config_path)
+        finally:
+            if tmp_path.exists():
+                tmp_path.unlink()
 
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as tmp_file:
-            tmp_file.write(content)
-        os.replace(tmp_path, config_path)
-        set_runtime_config_permissions(config_path)
-    finally:
-        if tmp_path.exists():
-            tmp_path.unlink()
+    request_proxy_reload()
 
 
 def validate_client_id(client_id: str) -> None:
