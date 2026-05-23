@@ -29,3 +29,16 @@ services:
       - ./data:/app/data
       - ./backups:/app/backups
       - ./logs:/app/logs
+
+  support_bot:
+    build:
+      context: .
+      dockerfile: bot/Dockerfile
+    container_name: mtproto-shop-support-bot
+    restart: unless-stopped
+    env_file:
+      - .env
+    command: ["python", "support_bot.py"]
+    volumes:
+      - ./data:/app/data
+      - ./logs:/app/logs

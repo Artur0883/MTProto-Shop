@@ -34,7 +34,7 @@ need_env() {
   if [[ ! -f .env ]]; then
     echo -e "${YELLOW}.env не найден. Создаю из .env.example...${NC}"
     cp .env.example .env
-    echo -e "${RED}Заполните .env: BOT_TOKEN, ADMIN_ID, SERVER_HOST, SUPPORT_CONTACT.${NC}"
+    echo -e "${RED}Заполните .env: BOT_TOKEN, ADMIN_ID, SERVER_HOST, SUPPORT_CONTACT и SUPPORT_BOT_TOKEN для отдельного бота поддержки.${NC}"
     return 1
   fi
 }
@@ -102,13 +102,18 @@ show_proxy_logs() {
   $COMPOSE_CMD logs -f --tail=120 mtproto
 }
 
+show_support_bot_logs() {
+  echo "Выход из логов: Ctrl+C"
+  $COMPOSE_CMD logs -f --tail=120 support_bot
+}
+
 restart_bot() {
   echo
-  echo -e "${BLUE}Пересоздаю Telegram-бота...${NC}"
-  $COMPOSE_CMD up -d --build --force-recreate bot
-  echo -e "${GREEN}Готово: бот пересоздан.${NC}"
+  echo -e "${BLUE}Пересоздаю Telegram-ботов...${NC}"
+  $COMPOSE_CMD up -d --build --force-recreate bot support_bot
+  echo -e "${GREEN}Готово: основной бот и бот поддержки пересозданы.${NC}"
   echo
-  $COMPOSE_CMD ps bot
+  $COMPOSE_CMD ps bot support_bot
 }
 
 restart_proxy_container() {
@@ -122,9 +127,9 @@ restart_proxy_container() {
 
 restart_all_services() {
   echo
-  echo -e "${BLUE}Пересоздаю бота и MTProto proxy...${NC}"
-  $COMPOSE_CMD up -d --build --force-recreate bot mtproto
-  echo -e "${GREEN}Готово: бот и MTProto proxy пересозданы.${NC}"
+  echo -e "${BLUE}Пересоздаю ботов и MTProto proxy...${NC}"
+  $COMPOSE_CMD up -d --build --force-recreate bot support_bot mtproto
+  echo -e "${GREEN}Готово: боты и MTProto proxy пересозданы.${NC}"
   echo
   $COMPOSE_CMD ps
 }
@@ -203,10 +208,11 @@ while true; do
   echo "11) ♻️ Применить изменения proxy"
   echo "12) ⚙️ Открыть .env"
   echo "13) 💾 Сделать бэкап"
-  echo "14) 🔁 Пересоздать Telegram-бота"
+  echo "14) 🔁 Пересоздать Telegram-ботов"
   echo "15) 🔁 Пересоздать MTProto proxy"
-  echo "16) 🔁 Пересоздать бота + MTProto proxy"
+  echo "16) 🔁 Пересоздать ботов + MTProto proxy"
   echo "17) 🖥️ Перезагрузить VPS полностью"
+  echo "18) 📄 Логи бота поддержки"
   echo "0) 🚪 Выход"
   echo
   read -r -p "Выберите действие: " choice
@@ -229,6 +235,7 @@ while true; do
     15) restart_proxy_container; pause ;;
     16) restart_all_services; pause ;;
     17) reboot_vps ;;
+    18) show_support_bot_logs ;;
     0) exit 0 ;;
     *) echo "Неверный пункт"; pause ;;
   esac

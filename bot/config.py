@@ -43,6 +43,7 @@ def sanitize_support_contact(contact: str, bot_token: str) -> str:
 @dataclass(frozen=True)
 class Settings:
     bot_token: str
+    support_bot_token: str
     admin_id: int | None
     server_host: str
     proxy_port: int
@@ -65,6 +66,7 @@ def get_settings() -> Settings:
 
     return Settings(
         bot_token=bot_token,
+        support_bot_token=os.getenv("SUPPORT_BOT_TOKEN", "").strip(),
         admin_id=admin_id,
         server_host=os.getenv("SERVER_HOST", "SERVER_HOST"),
         proxy_port=int(os.getenv("PROXY_PORT", "443")),
