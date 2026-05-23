@@ -58,7 +58,26 @@ reload_proxy() {
   fi
 }
 
+update_source_code() {
+  if [[ ! -d .git ]]; then
+    echo -e "${YELLOW}Git-репозиторий не найден, пропускаю загрузку обновлений.${NC}"
+    return 0
+  fi
+
+  echo -e "${BLUE}Загружаю обновления из GitHub...${NC}"
+  if ! git pull --ff-only origin main; then
+    echo -e "${RED}Не удалось обновить код. Сборка старой версии отменена.${NC}"
+    echo "Проверьте файлы, мешающие обновлению: git status --short"
+    echo "После исправления снова выберите пункт 1."
+    return 1
+  fi
+}
+
 install_or_update() {
+  if ! update_source_code; then
+    return 0
+  fi
+
   need_env || {
     echo
     echo "После заполнения .env снова запустите: ./manage.sh"
