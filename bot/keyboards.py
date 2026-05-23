@@ -37,12 +37,10 @@ def client_menu() -> ReplyKeyboardMarkup:
 def admin_menu() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(
         keyboard=[
-            [KeyboardButton(text=USERS_BUTTON)],
+            [KeyboardButton(text=USERS_BUTTON), KeyboardButton(text=STATS_BUTTON)],
             [KeyboardButton(text=ISSUE_ACCESS_BUTTON), KeyboardButton(text=EXTEND_ACCESS_BUTTON)],
             [KeyboardButton(text=ROTATE_ACCESS_BUTTON), KeyboardButton(text=DISABLE_ACCESS_BUTTON)],
-            [KeyboardButton(text=STATS_BUTTON)],
-            [KeyboardButton(text=STATUS_BUTTON)],
-            [KeyboardButton(text=REBOOT_BUTTON)],
+            [KeyboardButton(text=STATUS_BUTTON), KeyboardButton(text=REBOOT_BUTTON)],
         ],
         resize_keyboard=True,
         input_field_placeholder="Админ-меню",
