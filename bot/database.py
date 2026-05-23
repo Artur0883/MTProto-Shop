@@ -110,6 +110,22 @@ async def init_db(database_path: Path) -> None:
                 ON subscriptions(status, expires_at);
             """
         )
+        for statement in (
+            "ALTER TABLE users ADD COLUMN trial_used INTEGER NOT NULL DEFAULT 0",
+            "ALTER TABLE users ADD COLUMN trial_used_at TEXT",
+            "ALTER TABLE subscriptions ADD COLUMN last_secret_rotated_at TEXT",
+        ):
+            try:
+                await db.execute(statement)
+            except aiosqlite.OperationalError as exc:
+                if "duplicate column name" not in str(exc).lower():
+                    raise
+        await db.execute(
+            """
+            UPDATE users SET trial_used = 1 WHERE id IN
+                (SELECT DISTINCT user_id FROM subscriptions WHERE tariff_days = 1)
+            """
+        )
         await db.commit()
 
 
@@ -217,6 +233,29 @@ async def get_user_by_telegram_id(
             (telegram_id,),
         )
         return row_to_dict(await cursor.fetchone())
+
+
+async def has_used_trial(database_path: Path, telegram_id: int) -> bool:
+    async with open_db(database_path) as db:
+        cursor = await db.execute(
+            "SELECT trial_used FROM users WHERE telegram_id = ?",
+            (telegram_id,),
+        )
+        row = await cursor.fetchone()
+        return bool(row is not None and row["trial_used"])
+
+
+async def mark_trial_used(database_path: Path, telegram_id: int) -> None:
+    async with open_db(database_path) as db:
+        await db.execute(
+            """
+            UPDATE users
+            SET trial_used = 1, trial_used_at = ?
+            WHERE telegram_id = ?
+            """,
+            (to_db_datetime(utc_now()), telegram_id),
+        )
+        await db.commit()
 
 
 async def get_recent_users(database_path: Path, limit: int = 10) -> list[dict[str, Any]]:
@@ -433,6 +472,48 @@ async def update_latest_subscription_secret_by_telegram_id(
         await db.commit()
 
     return await get_latest_subscription_by_telegram_id(database_path, telegram_id)
+
+
+async def get_last_secret_rotated_at(
+    database_path: Path,
+    telegram_id: int,
+) -> datetime | None:
+    async with open_db(database_path) as db:
+        cursor = await db.execute(
+            """
+            SELECT s.last_secret_rotated_at
+            FROM subscriptions s
+            JOIN users u ON u.id = s.user_id
+            WHERE u.telegram_id = ?
+            ORDER BY datetime(s.created_at) DESC, s.id DESC
+            LIMIT 1
+            """,
+            (telegram_id,),
+        )
+        row = await cursor.fetchone()
+        if row is None or row["last_secret_rotated_at"] is None:
+            return None
+        return from_db_datetime(row["last_secret_rotated_at"])
+
+
+async def mark_secret_rotated(database_path: Path, telegram_id: int) -> None:
+    async with open_db(database_path) as db:
+        await db.execute(
+            """
+            UPDATE subscriptions
+            SET last_secret_rotated_at = ?
+            WHERE id = (
+                SELECT s.id
+                FROM subscriptions s
+                JOIN users u ON u.id = s.user_id
+                WHERE u.telegram_id = ?
+                ORDER BY datetime(s.created_at) DESC, s.id DESC
+                LIMIT 1
+            )
+            """,
+            (to_db_datetime(utc_now()), telegram_id),
+        )
+        await db.commit()
 
 
 async def get_expired_active_subscriptions(

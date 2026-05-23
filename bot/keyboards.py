@@ -4,7 +4,13 @@ from aiogram.types import KeyboardButton, ReplyKeyboardMarkup
 from tariffs import TARIFFS
 
 
-BUY_BUTTON = "🚀 Купить доступ"
+TRY_FREE_BUTTON = "🎁 Попробовать бесплатно"
+BUY_BUTTON = "💳 Купить доступ"
+OLD_BUY_BUTTON = "🚀 Купить доступ"
+CONNECT_BUTTON = "🔐 Подключиться"
+MY_SUBSCRIPTION_BUTTON = "⏳ Моя подписка"
+INSTRUCTION_BUTTON = "📖 Инструкция"
+HELP_BUTTON = "🆘 Помощь"
 MY_LINK_BUTTON = "🔐 Подключиться"
 OLD_MY_LINK_BUTTON = "🔗 Моя ссылка"
 DAYS_LEFT_BUTTON = "⏳ Срок доступа"
@@ -25,9 +31,9 @@ BACK_BUTTON = "⬅️ Назад"
 def client_menu() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(
         keyboard=[
-            [KeyboardButton(text=BUY_BUTTON)],
-            [KeyboardButton(text=MY_LINK_BUTTON), KeyboardButton(text=DAYS_LEFT_BUTTON)],
-            [KeyboardButton(text=SUPPORT_BUTTON)],
+            [KeyboardButton(text=TRY_FREE_BUTTON), KeyboardButton(text=BUY_BUTTON)],
+            [KeyboardButton(text=CONNECT_BUTTON), KeyboardButton(text=MY_SUBSCRIPTION_BUTTON)],
+            [KeyboardButton(text=INSTRUCTION_BUTTON), KeyboardButton(text=HELP_BUTTON)],
         ],
         resize_keyboard=True,
         input_field_placeholder="Выберите действие",
@@ -111,7 +117,89 @@ def connect_keyboard(link: str) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [InlineKeyboardButton(text="🔐 Подключиться к MTProto", url=button_url)],
-            [InlineKeyboardButton(text="💬 Нужна помощь", callback_data="client_support_inline")],
+            [
+                InlineKeyboardButton(text="📖 Инструкция", callback_data="client_instruction"),
+                InlineKeyboardButton(
+                    text="🆘 Не подключается?",
+                    callback_data="client_troubleshoot",
+                ),
+            ],
+        ]
+    )
+
+
+def instructions_menu() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="📱 iPhone", callback_data="client_instr_iphone")],
+            [InlineKeyboardButton(text="🤖 Android", callback_data="client_instr_android")],
+            [
+                InlineKeyboardButton(
+                    text="💻 Windows / macOS",
+                    callback_data="client_instr_desktop",
+                )
+            ],
+            [InlineKeyboardButton(text=BACK_BUTTON, callback_data="client_back")],
+        ]
+    )
+
+
+def help_menu() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="💬 Написать в поддержку",
+                    callback_data="client_support_inline",
+                )
+            ],
+            [InlineKeyboardButton(text=BACK_BUTTON, callback_data="client_back")],
+        ]
+    )
+
+
+def my_subscription_keyboard(has_active: bool) -> InlineKeyboardMarkup:
+    if not has_active:
+        return InlineKeyboardMarkup(
+            inline_keyboard=[
+                [
+                    InlineKeyboardButton(
+                        text=TRY_FREE_BUTTON,
+                        callback_data="client_try_free",
+                    ),
+                    InlineKeyboardButton(text=BUY_BUTTON, callback_data="client_buy"),
+                ],
+                [InlineKeyboardButton(text=BACK_BUTTON, callback_data="client_back")],
+            ]
+        )
+
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(text=CONNECT_BUTTON, callback_data="client_connect"),
+                InlineKeyboardButton(text="🔁 Продлить", callback_data="client_buy"),
+            ],
+            [
+                InlineKeyboardButton(
+                    text="🔄 Обновить ключ",
+                    callback_data="client_rotate_key",
+                )
+            ],
+            [InlineKeyboardButton(text=BACK_BUTTON, callback_data="client_back")],
+        ]
+    )
+
+
+def try_or_buy_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text=TRY_FREE_BUTTON,
+                    callback_data="client_try_free",
+                ),
+                InlineKeyboardButton(text=BUY_BUTTON, callback_data="client_buy"),
+            ]
         ]
     )
 

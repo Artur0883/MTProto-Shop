@@ -12,7 +12,7 @@ class Tariff:
 TARIFFS: dict[int, Tariff] = {
     1: Tariff(
         days=1,
-        title="🎁 Пробный период — 1 день — бесплатно",
+        title="🎁 Пробный — 1 день",
         price=0,
         enabled=True,
     ),
@@ -24,21 +24,21 @@ TARIFFS: dict[int, Tariff] = {
     ),
     90: Tariff(
         days=90,
-        title="🗓 3 месяца — в разработке",
-        price=None,
-        enabled=False,
+        title="🗓 3 месяца — 130 ₽",
+        price=130,
+        enabled=True,
     ),
     180: Tariff(
         days=180,
-        title="🗓 6 месяцев — в разработке",
-        price=None,
-        enabled=False,
+        title="🗓 6 месяцев — 240 ₽",
+        price=240,
+        enabled=True,
     ),
     365: Tariff(
         days=365,
-        title="🗓 12 месяцев — в разработке",
-        price=None,
-        enabled=False,
+        title="🗓 12 месяцев — 450 ₽",
+        price=450,
+        enabled=True,
     ),
 }
 
