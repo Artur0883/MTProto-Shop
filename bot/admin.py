@@ -1,6 +1,8 @@
-from datetime import timedelta
+import asyncio
+from datetime import UTC, datetime, timedelta
 from html import escape
 import logging
+from pathlib import Path
 
 from aiogram import Bot, F, Router
 from aiogram.exceptions import TelegramForbiddenError
@@ -30,6 +32,7 @@ from keyboards import (
     DISABLE_ACCESS_BUTTON,
     EXTEND_ACCESS_BUTTON,
     ISSUE_ACCESS_BUTTON,
+    REBOOT_BUTTON,
     ROTATE_ACCESS_BUTTON,
     STATS_BUTTON,
     USERS_BUTTON,
@@ -60,6 +63,8 @@ SIGUSR2_NOTICE = (
     "1. Откройте <code>mtp</code> → пункт <b>11</b> (♻️ Применить изменения proxy)\n"
     "Или вручную: <code>docker compose kill -s SIGUSR2 mtproto</code>"
 )
+RESTART_REQUEST_PATH = Path("/app/data/restart.request")
+RESTART_COOLDOWN_SEC = 60
 
 
 def access_disabled_text(note: str = "") -> str:
@@ -297,6 +302,76 @@ async def admin_start(message: Message) -> None:
         f"🚫 Отключённые: {result['disabled']}",
         reply_markup=admin_menu(),
     )
+
+
+@router.message(F.text == REBOOT_BUTTON)
+async def reboot_request(message: Message) -> None:
+    if await deny_if_not_admin(message):
+        return
+    kb = InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="⚠️ Подтвердить рестарт",
+                    callback_data="admin_reboot_confirm",
+                )
+            ],
+            [InlineKeyboardButton(text="⬅️ Отмена", callback_data="admin_reboot_cancel")],
+        ]
+    )
+    await message.answer(
+        "<b>🔁 Перезагрузка системы</b>\n\n"
+        "Будут пересозданы все три контейнера: основной бот, бот поддержки и MTProto-прокси.\n"
+        "Все клиенты потеряют соединение примерно на 30 секунд.\n\n"
+        "Продолжить?",
+        reply_markup=kb,
+    )
+
+
+@router.callback_query(F.data == "admin_reboot_cancel")
+async def reboot_cancel(callback: CallbackQuery) -> None:
+    if callback.from_user is None or not is_admin(callback.from_user.id):
+        await callback.answer("Доступ запрещён.", show_alert=True)
+        return
+    if callback.message and hasattr(callback.message, "edit_text"):
+        await callback.message.edit_text("Отменено.")
+    await callback.answer()
+
+
+@router.callback_query(F.data == "admin_reboot_confirm")
+async def reboot_confirm(callback: CallbackQuery, bot: Bot) -> None:
+    if callback.from_user is None or not is_admin(callback.from_user.id):
+        await callback.answer("Доступ запрещён.", show_alert=True)
+        return
+    message = callback.message
+    if RESTART_REQUEST_PATH.exists():
+        age = datetime.now(UTC).timestamp() - RESTART_REQUEST_PATH.stat().st_mtime
+        if age < RESTART_COOLDOWN_SEC:
+            await callback.answer("⏳ Уже идёт перезагрузка, подождите.", show_alert=True)
+            return
+    if message and hasattr(message, "edit_text"):
+        await message.edit_text(
+            "🔁 Перезагрузка запущена.\n\n"
+            "Бот вернётся через ~30 секунд. Если через минуту бот не отвечает — "
+            "проверьте на VPS: mtp → пункт 19 (установка watcher)."
+        )
+    RESTART_REQUEST_PATH.parent.mkdir(parents=True, exist_ok=True)
+    RESTART_REQUEST_PATH.write_text(datetime.now(UTC).isoformat())
+    await callback.answer("Запущено")
+
+    async def check_watcher() -> None:
+        await asyncio.sleep(10)
+        if RESTART_REQUEST_PATH.exists():
+            try:
+                await bot.send_message(
+                    callback.from_user.id,
+                    "⚠️ Watcher автоперезагрузки не отвечает.\n\n"
+                    "Установите его один раз на VPS: mtp → пункт 19.",
+                )
+            except Exception:
+                logging.exception("Failed to notify admin about missing watcher")
+
+    asyncio.create_task(check_watcher())
 
 
 @router.message(F.text == USERS_BUTTON)

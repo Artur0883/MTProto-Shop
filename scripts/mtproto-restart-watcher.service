@@ -1,0 +1,13 @@
+[Unit]
+Description=MTProto-Shop restart watcher
+After=docker.service
+Requires=docker.service
+
+[Service]
+Type=simple
+ExecStart=/root/MTProto-Shop/MTProto-Shop/scripts/mtproto-restart-watcher.sh
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

@@ -142,6 +142,22 @@ reboot_vps() {
   reboot
 }
 
+install_restart_watcher() {
+  echo
+  echo -e "${BLUE}Устанавливаю watcher автоматического рестарта...${NC}"
+  if ! cp scripts/mtproto-restart-watcher.service /etc/systemd/system/; then
+    echo -e "${RED}Не удалось скопировать systemd unit watcher.${NC}"
+    return 1
+  fi
+  if ! chmod +x scripts/mtproto-restart-watcher.sh \
+    || ! systemctl daemon-reload \
+    || ! systemctl enable --now mtproto-restart-watcher.service; then
+    echo -e "${RED}Не удалось установить или запустить watcher.${NC}"
+    return 1
+  fi
+  echo -e "${GREEN}✅ Watcher установлен и запущен${NC}"
+}
+
 list_keys() {
   run_bot_cmd list
 }
@@ -213,6 +229,7 @@ while true; do
   echo "16) 🔁 Пересоздать ботов + MTProto proxy"
   echo "17) 🖥️ Перезагрузить VPS полностью"
   echo "18) 📄 Логи бота поддержки"
+  echo "19) 🛡 Установить watcher автоматического рестарта (одноразово)"
   echo "0) 🚪 Выход"
   echo
   read -r -p "Выберите действие: " choice
@@ -236,6 +253,7 @@ while true; do
     16) restart_all_services; pause ;;
     17) reboot_vps ;;
     18) show_support_bot_logs ;;
+    19) install_restart_watcher || true; pause ;;
     0) exit 0 ;;
     *) echo "Неверный пункт"; pause ;;
   esac
