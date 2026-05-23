@@ -81,6 +81,12 @@ def request_proxy_reload() -> None:
 
 def write_config(config_path: Path, users: dict[str, str]) -> None:
     ensure_runtime_config(config_path)
+    if os.name != "nt":
+        for stale in config_path.parent.glob("tmp*.py"):
+            try:
+                stale.unlink()
+            except OSError:
+                pass
     config_path.parent.mkdir(parents=True, exist_ok=True)
     sorted_users = dict(sorted(users.items(), key=lambda item: item[0]))
     users_lines = "\n".join(

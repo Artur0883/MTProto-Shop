@@ -42,11 +42,23 @@ async def main() -> None:
     dp.include_router(client_router)
 
     worker_task: asyncio.Task | None = None
+    heartbeat_task: asyncio.Task | None = None
+
+    async def bot_heartbeat_loop() -> None:
+        beat_path = settings.database_path.parent / "heartbeats" / "bot.beat"
+        beat_path.parent.mkdir(parents=True, exist_ok=True)
+        while True:
+            try:
+                beat_path.touch()
+            except Exception:
+                logging.warning("bot heartbeat write failed")
+            await asyncio.sleep(30)
 
     async def on_startup() -> None:
-        nonlocal worker_task
+        nonlocal heartbeat_task, worker_task
         runtime.STARTED_AT = datetime.now(UTC)
         worker_task = asyncio.create_task(subscription_worker(bot))
+        heartbeat_task = asyncio.create_task(bot_heartbeat_loop())
         logging.info("Telegram Bot MVP is running")
 
     async def on_shutdown() -> None:
@@ -54,6 +66,12 @@ async def main() -> None:
             worker_task.cancel()
             try:
                 await worker_task
+            except asyncio.CancelledError:
+                pass
+        if heartbeat_task is not None:
+            heartbeat_task.cancel()
+            try:
+                await heartbeat_task
             except asyncio.CancelledError:
                 pass
         await bot.session.close()

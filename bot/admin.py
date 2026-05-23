@@ -537,6 +537,8 @@ async def system_status(message: Message) -> None:
         f"💾 Диск VPS: {disk_line}\n"
         f"🧠 Память VPS: {mem_line}\n"
         f"📡 Адрес сервера: {settings.server_host}:{settings.proxy_port}\n\n"
+        "⚠️ Изменения .env применяются только после рестарта контейнеров "
+        "(кнопка «🔁 Перезагрузка системы»).\n"
         f"🕐 Последний рестарт через бота: {last_restart}"
     )
     await message.answer(text, reply_markup=admin_menu())

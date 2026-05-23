@@ -3,6 +3,17 @@ services:
     image: alexbers/mtprotoproxy:stable
     container_name: mtproto-shop-proxy
     restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
+    healthcheck:
+      test: ["CMD-SHELL", "python3 -c \"import os,socket; s=socket.socket(); s.settimeout(2); s.connect(('127.0.0.1', int(os.getenv('PROXY_PORT','443')))); s.close()\""]
+      interval: 60s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
     env_file:
       - .env
     environment:
@@ -20,6 +31,17 @@ services:
       dockerfile: bot/Dockerfile
     container_name: mtproto-shop-bot
     restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
+    healthcheck:
+      test: ["CMD-SHELL", "test -f /app/data/heartbeats/bot.beat && [ $$(($$(date +%s) - $$(stat -c %Y /app/data/heartbeats/bot.beat))) -lt 90 ]"]
+      interval: 60s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
     env_file:
       - .env
     environment:
@@ -36,6 +58,17 @@ services:
       dockerfile: bot/Dockerfile
     container_name: mtproto-shop-support-bot
     restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
+    healthcheck:
+      test: ["CMD-SHELL", "test -f /app/data/heartbeats/support_bot.beat && [ $$(($$(date +%s) - $$(stat -c %Y /app/data/heartbeats/support_bot.beat))) -lt 90 ]"]
+      interval: 60s
+      timeout: 5s
+      retries: 3
+      start_period: 60s
     env_file:
       - .env
     command: ["python", "support_bot.py"]

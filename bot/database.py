@@ -49,6 +49,9 @@ async def open_db(database_path: Path):
 
 async def init_db(database_path: Path) -> None:
     async with open_db(database_path) as db:
+        await db.execute("PRAGMA journal_mode=WAL")
+        await db.execute("PRAGMA synchronous=NORMAL")
+        await db.execute("PRAGMA busy_timeout=5000")
         await db.executescript(
             """
             CREATE TABLE IF NOT EXISTS users (

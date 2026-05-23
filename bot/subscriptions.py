@@ -17,7 +17,7 @@ from database import (
 from proxy_manager import ClientNotFoundError, delete_secret
 
 
-CHECK_INTERVAL_SECONDS = 60 * 60
+CHECK_INTERVAL_SECONDS = 300
 
 
 def client_id_for(telegram_id: int) -> str:
@@ -57,7 +57,8 @@ async def expire_subscriptions(bot: Bot) -> None:
         try:
             await bot.send_message(
                 telegram_id,
-                "Срок вашей подписки истёк. Доступ отключён.",
+                "⏳ Срок подписки истёк, доступ отключён.\n\n"
+                "🔁 Чтобы продлить — нажмите /start → 💳 Купить доступ.",
             )
         except Exception as exc:
             logging.warning("Failed to notify expired user %s: %s", telegram_id, exc)
@@ -78,6 +79,7 @@ async def send_reminders(bot: Bot) -> None:
         if (
             timedelta(days=2) < remaining <= timedelta(days=3)
             and not subscription["reminder_3d_sent"]
+            and subscription["tariff_days"] > 1
         ):
             try:
                 await bot.send_message(
@@ -90,6 +92,7 @@ async def send_reminders(bot: Bot) -> None:
         elif (
             remaining <= timedelta(days=1)
             and not subscription["reminder_1d_sent"]
+            and subscription["tariff_days"] > 1
         ):
             try:
                 await bot.send_message(

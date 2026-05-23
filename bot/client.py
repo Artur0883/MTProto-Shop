@@ -777,3 +777,10 @@ async def relay_client_to_admin(message: Message) -> None:
         )
     except Exception:
         logging.exception("Failed to relay client support message to admin")
+        try:
+            await message.answer(
+                "❌ Не получилось передать сообщение оператору. "
+                "Попробуйте позже или используйте /start."
+            )
+        except Exception:
+            pass
