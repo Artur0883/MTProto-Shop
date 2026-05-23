@@ -3,6 +3,7 @@ from html import escape
 import logging
 
 from aiogram import Bot, F, Router
+from aiogram.exceptions import TelegramForbiddenError
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
@@ -21,6 +22,7 @@ from database import (
     get_stats,
     get_user_by_telegram_id,
     mark_subscription_status,
+    resolve_support_thread,
     update_latest_subscription_secret_by_telegram_id,
     utc_now,
 )
@@ -246,6 +248,31 @@ def users_keyboard(rows: list[dict]) -> InlineKeyboardMarkup:
             for row in rows
         ]
     )
+
+
+@router.message(F.reply_to_message)
+async def admin_reply_to_client(message: Message, bot: Bot) -> None:
+    user = message.from_user
+    if user is None or not is_admin(user.id):
+        return
+
+    try:
+        settings = get_settings()
+        reply_id = message.reply_to_message.message_id
+        client_id = await resolve_support_thread(settings.database_path, reply_id)
+        if client_id is None:
+            return
+
+        await bot.copy_message(
+            chat_id=client_id,
+            from_chat_id=message.chat.id,
+            message_id=message.message_id,
+        )
+    except TelegramForbiddenError:
+        logging.exception("Client blocked bot while relaying support reply")
+        await message.answer("❌ Клиент заблокировал бота")
+    except Exception:
+        logging.exception("Failed to relay admin support reply to client")
 
 
 @router.message(Command("admin"))

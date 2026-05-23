@@ -1,8 +1,9 @@
 from datetime import UTC, timedelta
 from html import escape
+import logging
 
 from aiogram import F, Router
-from aiogram.filters import CommandStart
+from aiogram.filters import CommandStart, StateFilter
 from aiogram.types import CallbackQuery, Message, User
 
 from config import get_settings
@@ -13,6 +14,7 @@ from database import (
     from_db_datetime,
     get_active_subscription_by_telegram_id,
     get_latest_subscription_by_telegram_id,
+    record_support_thread,
     upsert_user,
     utc_now,
 )
@@ -91,18 +93,29 @@ async def send_support_request(message: Message, user_override: User | None = No
         username = f"@{user.username}" if user.username else "не указан"
         full_name = user.full_name or "не указано"
 
-        await message.bot.send_message(
-            settings.admin_id,
-            "<b>💬 Новое обращение в поддержку</b>\n\n"
-            f"👤 Клиент: {escape(full_name)}\n"
-            f"🔗 Username: {escape(username)}\n"
-            f"🆔 Telegram ID: <code>{user.id}</code>\n\n"
-            "Клиент нажал кнопку поддержки.",
-        )
+        try:
+            await message.bot.send_message(
+                settings.admin_id,
+                "<b>💬 Новое обращение в поддержку</b>\n\n"
+                f"👤 Клиент: {escape(full_name)}\n"
+                f"🔗 Username: {escape(username)}\n"
+                f"🆔 Telegram ID: <code>{user.id}</code>\n\n"
+                "Клиент нажал кнопку поддержки.",
+            )
+        except Exception:
+            logging.exception(
+                "Failed to notify admin about support request from telegram_id=%s",
+                user.id,
+            )
+            await message.answer(
+                "Поддержка временно недоступна, попробуйте позже",
+                reply_markup=client_menu(),
+            )
+            return
 
         await message.answer(
             "<b>✅ Заявка отправлена</b>\n\n"
-            "Администратор получил ваше обращение и скоро свяжется с вами.",
+            "📝 Напишите ваш вопрос прямо в этот чат — оператор ответит здесь же.",
             reply_markup=client_menu(),
         )
         return
@@ -451,3 +464,41 @@ async def show_days_left(message: Message) -> None:
 @router.message(F.text == SUPPORT_BUTTON)
 async def support(message: Message) -> None:
     await send_support_request(message)
+
+
+@router.message(StateFilter(None), F.text)
+async def relay_client_to_admin(message: Message) -> None:
+    try:
+        settings = get_settings()
+        user = message.from_user
+        if settings.admin_id is None or user is None or user.id == settings.admin_id:
+            return
+        if message.text in {
+            BUY_BUTTON,
+            MY_LINK_BUTTON,
+            OLD_MY_LINK_BUTTON,
+            DAYS_LEFT_BUTTON,
+            OLD_DAYS_LEFT_BUTTON,
+            SUPPORT_BUTTON,
+        }:
+            return
+        if message.text.startswith("/"):
+            return
+
+        username = f"@{escape(user.username)}" if user.username else "без username"
+        await message.bot.send_message(
+            settings.admin_id,
+            f"💬 От клиента {escape(user.full_name)} {username} · ID <code>{user.id}</code>",
+        )
+        copied_message = await message.bot.copy_message(
+            chat_id=settings.admin_id,
+            from_chat_id=user.id,
+            message_id=message.message_id,
+        )
+        await record_support_thread(
+            settings.database_path,
+            copied_message.message_id,
+            user.id,
+        )
+    except Exception:
+        logging.exception("Failed to relay client support message to admin")

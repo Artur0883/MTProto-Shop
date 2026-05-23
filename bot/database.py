@@ -90,6 +90,12 @@ async def init_db(database_path: Path) -> None:
                 value TEXT
             );
 
+            CREATE TABLE IF NOT EXISTS support_threads (
+                admin_message_id INTEGER PRIMARY KEY,
+                client_telegram_id INTEGER NOT NULL,
+                created_at TEXT NOT NULL
+            );
+
             CREATE INDEX IF NOT EXISTS idx_users_telegram_id
                 ON users(telegram_id);
             CREATE INDEX IF NOT EXISTS idx_subscriptions_user_id
@@ -99,6 +105,40 @@ async def init_db(database_path: Path) -> None:
             """
         )
         await db.commit()
+
+
+async def record_support_thread(
+    database_path: Path,
+    admin_message_id: int,
+    client_telegram_id: int,
+) -> None:
+    async with open_db(database_path) as db:
+        await db.execute(
+            """
+            INSERT INTO support_threads (
+                admin_message_id, client_telegram_id, created_at
+            )
+            VALUES (?, ?, ?)
+            ON CONFLICT(admin_message_id) DO UPDATE SET
+                client_telegram_id = excluded.client_telegram_id,
+                created_at = excluded.created_at
+            """,
+            (admin_message_id, client_telegram_id, to_db_datetime(utc_now())),
+        )
+        await db.commit()
+
+
+async def resolve_support_thread(
+    database_path: Path,
+    admin_message_id: int,
+) -> int | None:
+    async with open_db(database_path) as db:
+        cursor = await db.execute(
+            "SELECT client_telegram_id FROM support_threads WHERE admin_message_id = ?",
+            (admin_message_id,),
+        )
+        row = await cursor.fetchone()
+        return int(row["client_telegram_id"]) if row is not None else None
 
 
 def row_to_dict(row: aiosqlite.Row | None) -> dict[str, Any] | None:
