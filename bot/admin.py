@@ -63,6 +63,15 @@ router = Router()
 
 
 PROXY_APPLY_NOTICE = "✅ Ключ применён в TeleMT мгновенно через API."
+CLIENT_PROXY_CLEANUP_NOTICE = (
+    "⚠️ Если у вас уже были старые или нерабочие прокси, удалите их перед "
+    "подключением нового ключа:\n\n"
+    "iPhone: Telegram → Настройки → Прокси\n"
+    "Если пункта «Прокси» нет: Настройки → Данные и память → Прокси\n"
+    "Android: Настройки → Данные и память → Прокси\n"
+    "Компьютер: Настройки → Продвинутые настройки → Тип соединения / Прокси\n\n"
+    "После этого нажмите на новый ключ и подключите его."
+)
 RESTART_REQUEST_PATH = Path("/app/data/restart.request")
 RESTART_COOLDOWN_SEC = 60
 SUPPORT_HEARTBEAT = Path("/app/data/heartbeats/support_bot.beat")
@@ -708,7 +717,8 @@ async def admin_card_rotate(callback: CallbackQuery, bot: Bot) -> None:
         await bot.send_message(
             telegram_id,
             "🔄 Администратор обновил ваш ключ доступа.\n\n"
-            f"⏳ Действует до: {expires_at_text}",
+            f"⏳ Действует до: {expires_at_text}\n\n"
+            f"{CLIENT_PROXY_CLEANUP_NOTICE}",
             reply_markup=connect_keyboard(link),
         )
     except Exception as exc:
@@ -997,7 +1007,8 @@ async def choose_tariff(callback: CallbackQuery, state: FSMContext, bot: Bot) ->
     await bot.send_message(
         telegram_id,
         f"{client_text}\n\n"
-        f"⏳ Действует до: {expires_at_text}",
+        f"⏳ Действует до: {expires_at_text}\n\n"
+        f"{CLIENT_PROXY_CLEANUP_NOTICE}",
         reply_markup=connect_keyboard(link),
     )
     await message.answer(
@@ -1045,7 +1056,7 @@ async def approve_payment_request(callback: CallbackQuery, bot: Bot) -> None:
         "<b>🎉 Доступ активирован!</b>\n\n"
         f"📦 Тариф: {escape(tariff.title)}\n"
         f"⏳ Действует до: {expires_at_text}\n\n"
-        "Нажмите кнопку ниже, чтобы подключиться.",
+        f"{CLIENT_PROXY_CLEANUP_NOTICE}",
         reply_markup=connect_keyboard(link),
     )
 
@@ -1161,7 +1172,8 @@ async def rotate_user_id(message: Message, state: FSMContext, bot: Bot) -> None:
         await bot.send_message(
             telegram_id,
             "🔄 Администратор обновил ваш ключ доступа.\n\n"
-            f"⏳ Действует до: {expires_at_text}",
+            f"⏳ Действует до: {expires_at_text}\n\n"
+            f"{CLIENT_PROXY_CLEANUP_NOTICE}",
             reply_markup=connect_keyboard(link),
         )
     except Exception as exc:

@@ -67,6 +67,17 @@ class ClientSupportStates(StatesGroup):
     waiting_message = State()
 
 
+PROXY_CLEANUP_NOTICE = (
+    "⚠️ Если у вас уже были старые или нерабочие прокси, удалите их перед "
+    "подключением нового ключа:\n\n"
+    "iPhone: Telegram → Настройки → Прокси\n"
+    "Если пункта «Прокси» нет: Настройки → Данные и память → Прокси\n"
+    "Android: Настройки → Данные и память → Прокси\n"
+    "Компьютер: Настройки → Продвинутые настройки → Тип соединения / Прокси\n\n"
+    "После этого нажмите на новый ключ и подключите его."
+)
+
+
 HELP_CHECKLIST_TEXT = (
     "<b>🆘 Не подключается?</b>\n\n"
     "Проверьте 5 пунктов:\n"
@@ -188,10 +199,7 @@ async def send_granted_access(message: Message, tariff: Tariff, subscription: di
         "<b>🎉 Доступ активирован!</b>\n\n"
         f"📦 Тариф: {escape(tariff.title)}\n"
         f"📅 Действует до: {format_datetime(subscription['expires_at'])}\n\n"
-        "Подключение в 3 шага:\n"
-        "1. Нажмите «🔐 Подключиться» ниже.\n"
-        "2. В Telegram нажмите «Включить прокси».\n"
-        "3. Готово — справа вверху значок 🛡.",
+        f"{PROXY_CLEANUP_NOTICE}",
         reply_markup=connect_keyboard(link),
     )
 
@@ -222,7 +230,7 @@ async def grant_free_trial(message: Message, user: User) -> bool:
 async def show_tariffs(message: Message) -> None:
     await message.answer(
         "<b>🚀 Получение доступа</b>\n\n"
-        "Выберите тариф:\n\n"
+        "Выберите вариант доступа:\n\n"
         "🎁 Пробный — 1 день — бесплатно\n"
         "🗓 1 месяц — 50 ₽\n"
         "🗓 3 месяца — 130 ₽\n"
@@ -336,16 +344,13 @@ async def start(message: Message, state: FSMContext) -> None:
         )
     else:
         text = (
-            "<b>👋 Добро пожаловать в MTProto Shop</b>\n\n"
-            "🔐 Это приватный MTProto-доступ для Telegram:\n"
-            "ваш личный ключ, отдельный от других клиентов,\n"
-            "без сложных настроек и без интернет-провайдера в середине.\n\n"
-            "Что внутри:\n"
-            "⚡ Подключение в 1 клик\n"
-            "🎁 1 день бесплатно\n"
-            "🔐 Индивидуальный ключ только для вас\n"
-            "💬 Поддержка рядом\n\n"
-            "🚀 Нажмите «Получить доступ» и выберите пробный тариф — ключ выдадим за пару секунд."
+            "<b>👋 Добро пожаловать в Van24 MTProto</b>\n\n"
+            "Здесь вы можете:\n\n"
+            "• 🚀 получить пробный доступ или выбрать тариф\n"
+            "• 🔑 получить свои ключи подключения\n"
+            "• 📅 проверить срок действия подписки\n"
+            "• 🆘 обратиться в поддержку\n\n"
+            "Нажмите /start или используйте меню ниже."
         )
 
     await message.answer(text, reply_markup=client_menu())
@@ -637,10 +642,10 @@ async def send_my_link(message: Message, telegram_id: int) -> None:
     )
 
     await message.answer(
-        "<b>🔐 Ваш доступ готов</b>\n\n"
+        "<b>🔑 Мои ключи</b>\n\n"
         f"⏳ Действует до: {format_datetime(subscription['expires_at'])}\n"
         f"✅ Осталось дней: {days_left(subscription['expires_at'])}\n\n"
-        "Нажмите кнопку ниже, чтобы подключиться.",
+        f"{PROXY_CLEANUP_NOTICE}",
         reply_markup=connect_keyboard(link),
     )
 
@@ -778,7 +783,7 @@ async def rotate_client_key(callback: CallbackQuery) -> None:
     await callback.answer("Ключ обновлён")
     await message.answer(
         "🔄 Ключ обновлён. Старый перестанет работать в течение ~5 секунд.\n\n"
-        "Новая ссылка использует TLS-маскировку — должна подключаться быстрее.",
+        f"{PROXY_CLEANUP_NOTICE}",
         reply_markup=connect_keyboard(link),
     )
 
