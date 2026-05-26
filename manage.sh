@@ -572,10 +572,27 @@ require_telemt_compose_service() {
     echo -e "${RED}Файл docker-compose.yml не найден.${NC}"
     return 1
   fi
-  if ! $COMPOSE_CMD config --services 2>/dev/null | grep -qx "mtproto"; then
-    echo -e "${RED}Сервис mtproto не найден в docker compose.${NC}"
+
+  local services rc=0 errlog
+  errlog="$(mktemp)"
+  services="$($COMPOSE_CMD config --services 2>"$errlog")" || rc=$?
+
+  if [[ "$rc" -ne 0 ]]; then
+    echo -e "${RED}docker compose config завершился с ошибкой (rc=${rc}).${NC}"
+    echo "Вывод stderr:"
+    cat "$errlog" || true
+    rm -f "$errlog"
     return 1
   fi
+  rm -f "$errlog"
+
+  if ! printf '%s\n' "$services" | grep -qx "mtproto"; then
+    echo -e "${RED}Сервис mtproto не найден в docker compose.${NC}"
+    echo "Доступные сервисы:"
+    printf '%s\n' "$services"
+    return 1
+  fi
+
   if ! docker inspect mtproto-shop-proxy >/dev/null 2>&1; then
     echo -e "${RED}Контейнер mtproto-shop-proxy не найден.${NC}"
     return 1
