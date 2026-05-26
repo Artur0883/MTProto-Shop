@@ -536,7 +536,7 @@ first_setup_wizard() {
   echo
   echo "Если бот не отвечает:"
   echo "mtp"
-  echo "→ 22) 🧪 Проверка установки"
+  echo "→ 23) 🧪 Проверка установки"
   echo "→ 4) 📄 Логи бота"
   echo
   echo "=================================================="
@@ -563,40 +563,89 @@ check_telemt_api() {
   fi
 }
 
-show_telemt_version_info() {
-  local image="$1"
-  local container_image_id version_output
-  container_image_id="$(docker inspect -f '{{.Image}}' mtproto-shop-proxy 2>/dev/null || true)"
+require_telemt_compose_service() {
+  if ! command -v docker >/dev/null 2>&1 || ! docker version >/dev/null 2>&1; then
+    echo -e "${RED}Docker недоступен. Проверка TeleMT невозможна.${NC}"
+    return 1
+  fi
+  if [[ ! -f docker-compose.yml ]]; then
+    echo -e "${RED}Файл docker-compose.yml не найден.${NC}"
+    return 1
+  fi
+  if ! $COMPOSE_CMD config --services 2>/dev/null | grep -qx "mtproto"; then
+    echo -e "${RED}Сервис mtproto не найден в docker compose.${NC}"
+    return 1
+  fi
+  if ! docker inspect mtproto-shop-proxy >/dev/null 2>&1; then
+    echo -e "${RED}Контейнер mtproto-shop-proxy не найден.${NC}"
+    return 1
+  fi
+}
 
-  echo "Способ установки TeleMT: docker compose, сервис mtproto."
-  echo "Используемый Docker image/tag: ${image}"
-  if [[ -n "$container_image_id" ]]; then
-    echo "Image ID текущего контейнера: ${container_image_id}"
-  else
-    echo "Image ID текущего контейнера: контейнер ещё не создан."
+show_telemt_version_info() {
+  if ! TELEMT_CURRENT_VERSION="$(docker exec mtproto-shop-proxy /app/telemt --version 2>/dev/null)"; then
+    echo -e "${RED}Не удалось получить версию работающего TeleMT командой /app/telemt --version.${NC}"
+    return 1
+  fi
+  if ! TELEMT_CURRENT_IMAGE="$(docker inspect mtproto-shop-proxy --format '{{.Config.Image}}' 2>/dev/null)" \
+    || ! TELEMT_OLD_IMAGE_ID="$(docker inspect mtproto-shop-proxy --format '{{.Image}}' 2>/dev/null)"; then
+    echo -e "${RED}Не удалось получить Docker image или Image ID контейнера TeleMT.${NC}"
+    return 1
   fi
 
-  if container_is_running "mtproto-shop-proxy"; then
-    version_output="$($COMPOSE_CMD exec -T mtproto /app/telemt --version 2>/dev/null || true)"
-    if [[ -z "$version_output" ]]; then
-      version_output="$($COMPOSE_CMD exec -T mtproto /app/telemt version 2>/dev/null || true)"
-    fi
-    if [[ -n "$version_output" ]]; then
-      echo "Версия TeleMT:"
-      echo "$version_output"
-    else
-      echo "Команда версии TeleMT недоступна; показаны image/tag и image ID."
-    fi
+  echo "Текущая версия TeleMT: ${TELEMT_CURRENT_VERSION}"
+  echo "Текущий Docker image tag: ${TELEMT_CURRENT_IMAGE}"
+  echo "Текущий Image ID контейнера: ${TELEMT_OLD_IMAGE_ID}"
+}
+
+pull_telemt_available_image() {
+  local available_version
+
+  echo
+  echo "Проверяю доступный образ TeleMT без перезапуска контейнера..."
+  if ! $COMPOSE_CMD pull mtproto; then
+    echo -e "${RED}Не удалось скачать информацию об образе TeleMT.${NC}"
+    return 1
+  fi
+  if ! TELEMT_NEW_IMAGE_ID="$(docker image inspect "$TELEMT_CURRENT_IMAGE" --format '{{.Id}}' 2>/dev/null)"; then
+    echo -e "${RED}Не удалось определить Image ID доступного образа TeleMT.${NC}"
+    return 1
+  fi
+  if available_version="$(docker run --rm "$TELEMT_CURRENT_IMAGE" /app/telemt --version 2>/dev/null)"; then
+    TELEMT_NEW_VERSION="$available_version"
   else
-    echo "Контейнер TeleMT не запущен; проверка команды версии пропущена."
+    TELEMT_NEW_VERSION="не определена"
+    echo "Версия нового образа командой не выводится. Сравнение выполнено по Docker Image ID."
+  fi
+  echo "Доступный Image ID: ${TELEMT_NEW_IMAGE_ID}"
+}
+
+check_telemt_version() {
+  echo
+  echo -e "${BLUE}Проверка версии TeleMT${NC}"
+  require_telemt_compose_service || return 1
+  show_telemt_version_info || return 1
+  pull_telemt_available_image || return 1
+  echo "Доступная версия TeleMT: ${TELEMT_NEW_VERSION}"
+
+  if [[ "$TELEMT_OLD_IMAGE_ID" == "$TELEMT_NEW_IMAGE_ID" ]]; then
+    echo -e "${GREEN}✅ TeleMT уже актуален. Обновление не требуется.${NC}"
+  else
+    echo -e "${YELLOW}⚠️ Доступно обновление.${NC}"
+    echo "Чтобы применить обновление, выберите пункт 7) 🔄 Обновить TeleMT."
   fi
 }
 
 backup_telemt_update_config() {
   local archive
+  local -a backup_items=(docker-compose.yml .env)
+
+  if [[ -d telemt ]]; then
+    backup_items+=(telemt)
+  fi
   mkdir -p backups
   archive="backups/telemt-update-$(date +%Y%m%d-%H%M%S).tar.gz"
-  if ! tar -czf "$archive" docker-compose.yml .env telemt; then
+  if ! tar -czf "$archive" "${backup_items[@]}"; then
     echo -e "${RED}Не удалось создать backup конфигурации TeleMT. Обновление отменено.${NC}"
     return 1
   fi
@@ -625,140 +674,50 @@ rollback_telemt_update() {
 }
 
 update_telemt() {
-  local configured_image target_image current_image_id new_image_id tag answer attempt
-  local compose_changed="false"
+  local answer
   TELEMT_UPDATE_BACKUP=""
 
   echo
-  echo -e "${BLUE}Проверка обновления TeleMT${NC}"
-  if ! command -v docker >/dev/null 2>&1 || ! docker version >/dev/null 2>&1; then
-    echo -e "${RED}Docker недоступен. Обновление TeleMT невозможно.${NC}"
+  echo -e "${BLUE}Обновление TeleMT${NC}"
+  require_telemt_compose_service || return 1
+  [[ -f .env ]] || {
+    echo -e "${RED}Файл .env не найден. Обновление отменено.${NC}"
     return 1
-  fi
-  if [[ ! -f docker-compose.yml ]]; then
-    echo -e "${RED}Файл docker-compose.yml не найден.${NC}"
-    return 1
-  fi
-  if ! $COMPOSE_CMD config --services 2>/dev/null | grep -qx "mtproto"; then
-    if docker inspect mtproto-shop-proxy >/dev/null 2>&1; then
-      echo -e "${YELLOW}Найден контейнер mtproto-shop-proxy, но сервис mtproto отсутствует в docker compose.${NC}"
-    elif command -v systemctl >/dev/null 2>&1 \
-      && systemctl list-unit-files 2>/dev/null | grep -qi "telemt"; then
-      echo -e "${YELLOW}Обнаружен systemd-сервис TeleMT. Этот пункт обновляет только compose-установку.${NC}"
-    else
-      echo -e "${RED}Не удалось определить compose-установку TeleMT.${NC}"
-    fi
-    return 1
-  fi
-  if [[ ! -f .env || ! -d telemt ]]; then
-    echo -e "${RED}Не найдены .env или каталог telemt с runtime-конфигурацией. Обновление отменено.${NC}"
-    return 1
-  fi
+  }
+  show_telemt_version_info || return 1
+  pull_telemt_available_image || return 1
+  echo "Новая версия TeleMT: ${TELEMT_NEW_VERSION}"
 
-  configured_image="$(awk '
-    /^  mtproto:/ { in_service=1; next }
-    in_service && /^  [A-Za-z0-9_-]+:/ { exit }
-    in_service && $1 == "image:" { print $2; exit }
-  ' docker-compose.yml)"
-  if [[ -z "$configured_image" ]]; then
-    echo -e "${RED}Не удалось определить Docker image сервиса mtproto.${NC}"
-    return 1
-  fi
-
-  show_telemt_version_info "$configured_image"
-  current_image_id="$(docker inspect -f '{{.Image}}' mtproto-shop-proxy 2>/dev/null || true)"
-  if [[ -z "$current_image_id" ]]; then
-    current_image_id="$(docker image inspect -f '{{.Id}}' "$configured_image" 2>/dev/null || true)"
-  fi
-
-  target_image="$configured_image"
-  tag="${configured_image##*:}"
-  if [[ "$configured_image" == *@* || "$tag" != "latest" ]]; then
-    echo "Сейчас используется фиксированная версия: ${tag}"
-    read -r -p "Обновить до latest? y/N " answer
-    if [[ ! "$answer" =~ ^[Yy]$ ]]; then
-      echo "Обновление TeleMT отменено."
-      return 0
-    fi
-    target_image="${configured_image%@*}"
-    target_image="${target_image%:*}:latest"
-    echo "Будет проверен образ: ${target_image}"
-    if ! docker pull "$target_image"; then
-      echo -e "${RED}Не удалось загрузить образ ${target_image}.${NC}"
-      return 1
-    fi
-  else
-    echo "Проверяю актуальный image TeleMT через docker compose pull mtproto..."
-    if ! $COMPOSE_CMD pull mtproto; then
-      echo -e "${RED}Не удалось проверить или загрузить image TeleMT.${NC}"
-      return 1
-    fi
-  fi
-
-  new_image_id="$(docker image inspect -f '{{.Id}}' "$target_image" 2>/dev/null || true)"
-  if [[ -z "$new_image_id" ]]; then
-    echo -e "${RED}Не удалось определить image ID после проверки обновления.${NC}"
-    return 1
-  fi
-  echo "Текущий image ID: ${current_image_id:-не найден}"
-  echo "Проверенный image ID: ${new_image_id}"
-  if [[ -n "$current_image_id" && "$current_image_id" == "$new_image_id" ]]; then
+  if [[ "$TELEMT_OLD_IMAGE_ID" == "$TELEMT_NEW_IMAGE_ID" ]]; then
     echo -e "${GREEN}✅ TeleMT уже актуален. Обновление не требуется.${NC}"
     return 0
   fi
 
-  echo -e "${YELLOW}Доступно обновление TeleMT.${NC}"
-  read -r -p "Продолжить обновление TeleMT? y/N " answer
+  echo -e "${YELLOW}⚠️ Найдена новая версия TeleMT.${NC}"
+  read -r -p "Применить обновление? y/N " answer
   if [[ ! "$answer" =~ ^[Yy]$ ]]; then
-    if [[ "$target_image" == "$configured_image" && -n "$current_image_id" ]]; then
-      docker tag "$current_image_id" "$configured_image" >/dev/null || true
-    fi
     echo "Обновление TeleMT отменено."
     return 0
   fi
 
   backup_telemt_update_config || return 1
-  if [[ "$target_image" != "$configured_image" ]]; then
-    if ! sed -i "s|image: ${configured_image}|image: ${target_image}|" docker-compose.yml \
-      || ! grep -q "image: ${target_image}" docker-compose.yml; then
-      echo -e "${RED}Не удалось заменить фиксированный image на ${target_image}.${NC}"
-      rollback_telemt_update "$configured_image" "$target_image" "$current_image_id" "true" || true
-      return 1
-    fi
-    compose_changed="true"
-    echo "docker-compose.yml обновлён после подтверждения: ${configured_image} → ${target_image}"
-  fi
-
   echo -e "${BLUE}Перезапускаю только контейнер TeleMT...${NC}"
-  if ! $COMPOSE_CMD up -d --force-recreate mtproto; then
+  if ! $COMPOSE_CMD up -d --no-deps mtproto; then
     echo -e "${RED}Обновление TeleMT не удалось при пересоздании контейнера.${NC}"
-    $COMPOSE_CMD logs --tail=100 mtproto || true
-    rollback_telemt_update "$configured_image" "$target_image" "$current_image_id" "$compose_changed" || true
-    return 1
-  fi
-  for attempt in {1..30}; do
-    if container_is_running "mtproto-shop-proxy" && container_is_healthy "mtproto-shop-proxy"; then
-      break
-    fi
-    if [[ "$attempt" -eq 30 ]]; then
-      echo -e "${RED}После обновления TeleMT не получил healthy-статус.${NC}"
-      $COMPOSE_CMD logs --tail=100 mtproto || true
-      rollback_telemt_update "$configured_image" "$target_image" "$current_image_id" "$compose_changed" || true
-      return 1
-    fi
-    sleep 2
-  done
-  if ! check_telemt_api; then
-    echo -e "${RED}После обновления TeleMT API не отвечает.${NC}"
-    $COMPOSE_CMD logs --tail=100 mtproto || true
-    rollback_telemt_update "$configured_image" "$target_image" "$current_image_id" "$compose_changed" || true
+    echo "Backup для ручного восстановления: ${TELEMT_UPDATE_BACKUP}"
     return 1
   fi
 
-  echo -e "${GREEN}✅ TeleMT обновлён и работает.${NC}"
-  show_telemt_version_info "$target_image"
+  echo
+  echo "Статус TeleMT:"
+  $COMPOSE_CMD ps mtproto || true
+  if TELEMT_CURRENT_VERSION="$(docker exec mtproto-shop-proxy /app/telemt --version 2>/dev/null)"; then
+    echo "Текущая версия TeleMT после обновления: ${TELEMT_CURRENT_VERSION}"
+  else
+    echo -e "${YELLOW}Не удалось получить версию TeleMT после обновления.${NC}"
+  fi
   echo "Последние строки логов TeleMT:"
-  $COMPOSE_CMD logs --tail=30 mtproto || true
+  $COMPOSE_CMD logs --tail=50 mtproto || true
 }
 
 update_source_code() {
@@ -1017,23 +976,24 @@ while true; do
   echo "3) ✅ Статус контейнеров"
   echo "4) 📄 Логи бота"
   echo "5) 📄 Логи TeleMT"
-  echo "6) 🔄 Обновить TeleMT"
-  echo "7) 📋 Список ключей"
-  echo "8) ➕ Добавить ключ вручную"
-  echo "9) 🔄 Обновить ключ клиента по Telegram ID + синхронизировать SQLite"
-  echo "10) 🔗 Показать ссылку по Telegram ID"
-  echo "11) 🔗 Показать ссылку по client_id"
-  echo "12) ❌ Удалить ключ по client_id"
-  echo "13) ♻️ Проверить TeleMT API / применить изменения"
-  echo "14) ⚙️ Открыть .env"
-  echo "15) 💾 Сделать бэкап"
-  echo "16) 🔁 Пересоздать Telegram-ботов"
-  echo "17) 🔁 Пересоздать MTProto proxy"
-  echo "18) 🔁 Пересоздать ботов + MTProto proxy"
-  echo "19) 🖥️ Перезагрузить VPS полностью"
-  echo "20) 📄 Логи бота поддержки"
-  echo "21) 🛡 Установить watcher автоматического рестарта"
-  echo "22) 🧪 Проверка установки"
+  echo "6) 🔍 Проверить версию TeleMT"
+  echo "7) 🔄 Обновить TeleMT"
+  echo "8) 📋 Список ключей"
+  echo "9) ➕ Добавить ключ вручную"
+  echo "10) 🔄 Обновить ключ клиента по Telegram ID + синхронизировать SQLite"
+  echo "11) 🔗 Показать ссылку по Telegram ID"
+  echo "12) 🔗 Показать ссылку по client_id"
+  echo "13) ❌ Удалить ключ по client_id"
+  echo "14) ♻️ Проверить TeleMT API / применить изменения"
+  echo "15) ⚙️ Открыть .env"
+  echo "16) 💾 Сделать бэкап"
+  echo "17) 🔁 Пересоздать Telegram-ботов"
+  echo "18) 🔁 Пересоздать MTProto proxy"
+  echo "19) 🔁 Пересоздать ботов + MTProto proxy"
+  echo "20) 🖥️ Перезагрузить VPS полностью"
+  echo "21) 📄 Логи бота поддержки"
+  echo "22) 🛡 Установить watcher автоматического рестарта"
+  echo "23) 🧪 Проверка установки"
   echo "0) 🚪 Выход"
   echo
   read -r -p "Выберите действие: " choice
@@ -1044,23 +1004,24 @@ while true; do
     3) show_status || true; pause ;;
     4) show_bot_logs || true ;;
     5) show_proxy_logs || true ;;
-    6) update_telemt || true; pause ;;
-    7) list_keys || true; pause ;;
-    8) add_key || true; pause ;;
-    9) rotate_key_by_telegram_id || true; pause ;;
-    10) show_link_by_telegram_id || true; pause ;;
-    11) show_link_by_client_id || true; pause ;;
-    12) delete_key || true; pause ;;
-    13) check_telemt_api || true; pause ;;
-    14) edit_env || true; pause ;;
-    15) backup_now || true; pause ;;
-    16) restart_bot || true; pause ;;
-    17) restart_proxy_container || true; pause ;;
-    18) restart_all_services || true; pause ;;
-    19) reboot_vps ;;
-    20) show_support_bot_logs || true ;;
-    21) install_restart_watcher || true; pause ;;
-    22) check_installation || true; pause ;;
+    6) check_telemt_version || true; pause ;;
+    7) update_telemt || true; pause ;;
+    8) list_keys || true; pause ;;
+    9) add_key || true; pause ;;
+    10) rotate_key_by_telegram_id || true; pause ;;
+    11) show_link_by_telegram_id || true; pause ;;
+    12) show_link_by_client_id || true; pause ;;
+    13) delete_key || true; pause ;;
+    14) check_telemt_api || true; pause ;;
+    15) edit_env || true; pause ;;
+    16) backup_now || true; pause ;;
+    17) restart_bot || true; pause ;;
+    18) restart_proxy_container || true; pause ;;
+    19) restart_all_services || true; pause ;;
+    20) reboot_vps ;;
+    21) show_support_bot_logs || true ;;
+    22) install_restart_watcher || true; pause ;;
+    23) check_installation || true; pause ;;
     0) exit 0 ;;
     *) echo "Неверный пункт"; pause ;;
   esac
