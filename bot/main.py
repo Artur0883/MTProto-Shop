@@ -11,7 +11,7 @@ from admin import router as admin_router
 from client import router as client_router
 from config import get_settings
 from database import init_db
-from proxy_manager import ensure_runtime_config
+from proxy_manager import ensure_runtime_config, require_supported_proxy_core
 import runtime
 from subscriptions import subscription_worker
 
@@ -24,6 +24,7 @@ async def main() -> None:
         stream=sys.stdout,
     )
 
+    require_supported_proxy_core()
     ensure_runtime_config(settings.proxy_config_path)
 
     if not settings.bot_token:

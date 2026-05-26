@@ -18,6 +18,7 @@ SECRET_RE = re.compile(r"^[0-9a-f]{32}$")
 CLIENT_RE = re.compile(r"^[A-Za-z0-9_.-]{1,64}$")
 SECURE_SECRET_PREFIX = "dd"
 TLS_SECRET_PREFIX = "ee"  # ee + 32 hex client secret + hex(UTF-8 TLS domain)
+SUPPORTED_PROXY_CORE = "alexbers"
 
 
 class ClientNotFoundError(ValueError):
@@ -30,6 +31,15 @@ def get_example_config_path(config_path: Path) -> Path:
 
 def set_runtime_config_permissions(config_path: Path) -> None:
     os.chmod(config_path, 0o644)
+
+
+def require_supported_proxy_core() -> None:
+    core = os.getenv("PROXY_CORE", SUPPORTED_PROXY_CORE).strip().lower()
+    if core != SUPPORTED_PROXY_CORE:
+        raise RuntimeError(
+            "TeleMT adapter is not implemented; set PROXY_CORE=alexbers "
+            "before managing proxy clients"
+        )
 
 
 def ensure_runtime_config(config_path: Path) -> None:
@@ -176,6 +186,7 @@ def build_tls_proxy_link(
 
 def create_secret(client_id: str, provided_secret: str | None = None) -> str:
     settings = get_settings()
+    require_supported_proxy_core()
     validate_client_id(client_id)
     secret = (provided_secret or generate_secret()).lower()
     validate_secret(secret)
@@ -192,6 +203,7 @@ def create_secret(client_id: str, provided_secret: str | None = None) -> str:
 
 def delete_secret(client_id: str) -> str:
     settings = get_settings()
+    require_supported_proxy_core()
     validate_client_id(client_id)
     users = load_users(settings.proxy_config_path)
     if client_id not in users:
@@ -205,6 +217,7 @@ def delete_secret(client_id: str) -> str:
 
 def rotate_secret(client_id: str) -> str:
     settings = get_settings()
+    require_supported_proxy_core()
     validate_client_id(client_id)
     users = load_users(settings.proxy_config_path)
     if client_id not in users:
@@ -255,6 +268,7 @@ async def rotate_telegram_secret(telegram_id: int) -> str:
 
 def get_link(client_id: str) -> str:
     settings = get_settings()
+    require_supported_proxy_core()
     validate_client_id(client_id)
     users = load_users(settings.proxy_config_path)
     if client_id not in users:
@@ -270,6 +284,7 @@ def get_link(client_id: str) -> str:
 
 def list_clients() -> dict[str, str]:
     settings = get_settings()
+    require_supported_proxy_core()
     return load_users(settings.proxy_config_path)
 
 

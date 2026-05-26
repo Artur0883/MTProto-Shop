@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
-PROJECT_DIR="/root/MTProto-Shop/MTProto-Shop"
+PROJECT_DIR="/opt/mtproto-shop"
 SENTINEL="$PROJECT_DIR/data/restart.request"
 HEARTBEAT_DIR="$PROJECT_DIR/data/heartbeats"
 HEARTBEAT="$HEARTBEAT_DIR/watcher.beat"

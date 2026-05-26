@@ -1,0 +1,4 @@
+# TeleMT intentionally remains disabled until bot/proxy_manager.py has a complete adapter.
+# The installer and the proxy-core switcher refuse this mode to avoid issuing unusable keys.
+name: mtproto-shop-telemt-disabled
+services: {}

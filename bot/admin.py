@@ -64,7 +64,7 @@ router = Router()
 
 SIGUSR2_NOTICE = (
     "✅ Изменения proxy применяются автоматически в течение ~5 секунд.\n"
-    "Если watcher не установлен (mtp → 19), запустите вручную: "
+    "Если watcher не установлен (mtp → 20), запустите вручную: "
     "<code>docker compose kill -s SIGUSR2 mtproto</code>"
 )
 RESTART_REQUEST_PATH = Path("/app/data/restart.request")
@@ -438,7 +438,7 @@ async def reboot_confirm(callback: CallbackQuery, bot: Bot) -> None:
         await message.edit_text(
             "🔁 Перезагрузка запущена.\n\n"
             "Бот вернётся через ~30 секунд. Если через минуту бот не отвечает — "
-            "проверьте на VPS: mtp → пункт 19 (установка watcher)."
+            "проверьте на VPS: mtp → пункт 20 (установка watcher)."
         )
     RESTART_REQUEST_PATH.parent.mkdir(parents=True, exist_ok=True)
     RESTART_REQUEST_PATH.write_text(datetime.now(UTC).isoformat())
@@ -451,7 +451,7 @@ async def reboot_confirm(callback: CallbackQuery, bot: Bot) -> None:
                 await bot.send_message(
                     callback.from_user.id,
                     "⚠️ Watcher автоперезагрузки не отвечает.\n\n"
-                    "Установите его один раз на VPS: mtp → пункт 19.",
+                    "Установите его один раз на VPS: mtp → пункт 20.",
                 )
             except Exception:
                 logging.exception("Failed to notify admin about missing watcher")
@@ -503,7 +503,7 @@ async def system_status(message: Message) -> None:
     else:
         watcher_line = (
             "⚠️ не установлен — кнопка «Перезагрузка системы» работать не будет.\n"
-            "   Откройте на VPS: mtp → пункт 19"
+            "   Откройте на VPS: mtp → пункт 20"
         )
 
     stats = await get_stats(settings.database_path)
