@@ -36,9 +36,12 @@ from keyboards import (
     MY_LINK_BUTTON,
     MY_PROXY_BUTTON,
     MY_SUBSCRIPTION_BUTTON,
+    OLD_CART_BUY_BUTTON,
     OLD_BUY_BUTTON,
     OLD_DAYS_LEFT_BUTTON,
     OLD_MY_LINK_BUTTON,
+    OLD_MY_PROXIES_BUTTON,
+    OLD_MY_PROXY_BUTTON,
     OLD_MY_SUBSCRIPTION_BUTTON,
     SUPPORT_BUTTON,
     TRY_FREE_BUTTON,
@@ -218,7 +221,7 @@ async def grant_free_trial(message: Message, user: User) -> bool:
 
 async def show_tariffs(message: Message) -> None:
     await message.answer(
-        "<b>💳 Покупка доступа</b>\n\n"
+        "<b>🚀 Получение доступа</b>\n\n"
         "Выберите тариф:\n\n"
         "🎁 Пробный — 1 день — бесплатно\n"
         "🗓 1 месяц — 50 ₽\n"
@@ -342,7 +345,7 @@ async def start(message: Message, state: FSMContext) -> None:
             "🎁 1 день бесплатно\n"
             "🔐 Индивидуальный ключ только для вас\n"
             "💬 Поддержка рядом\n\n"
-            "🛒 Нажмите «Купить доступ» и выберите пробный тариф — ключ выдадим за пару секунд."
+            "🚀 Нажмите «Получить доступ» и выберите пробный тариф — ключ выдадим за пару секунд."
         )
 
     await message.answer(text, reply_markup=client_menu())
@@ -358,7 +361,10 @@ async def try_free(message: Message, state: FSMContext) -> None:
 
 
 @router.message(
-    (F.text == BUY_BUTTON) | (F.text == OLD_BUY_BUTTON) | (F.text == LEGACY_BUY_BUTTON)
+    (F.text == BUY_BUTTON)
+    | (F.text == OLD_CART_BUY_BUTTON)
+    | (F.text == OLD_BUY_BUTTON)
+    | (F.text == LEGACY_BUY_BUTTON)
 )
 async def buy_access(message: Message, state: FSMContext) -> None:
     await state.clear()
@@ -642,6 +648,8 @@ async def send_my_link(message: Message, telegram_id: int) -> None:
 @router.message(
     (F.text == CONNECT_BUTTON)
     | (F.text == MY_PROXY_BUTTON)
+    | (F.text == OLD_MY_PROXY_BUTTON)
+    | (F.text == OLD_MY_PROXIES_BUTTON)
     | (F.text == MY_LINK_BUTTON)
     | (F.text == OLD_MY_LINK_BUTTON)
 )

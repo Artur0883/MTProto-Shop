@@ -5,11 +5,14 @@ from tariffs import TARIFFS
 
 
 TRY_FREE_BUTTON = "🎁 Попробовать бесплатно"
-BUY_BUTTON = "🛒 Купить доступ"
+BUY_BUTTON = "🚀 Получить доступ"
+OLD_CART_BUY_BUTTON = "🛒 Купить доступ"
 OLD_BUY_BUTTON = "💳 Купить доступ"
 LEGACY_BUY_BUTTON = "🚀 Купить доступ"
 CONNECT_BUTTON = "🔐 Подключиться"
-MY_PROXY_BUTTON = "🔑 Мой прокси"
+MY_PROXY_BUTTON = "🔑 Мои ключи"
+OLD_MY_PROXY_BUTTON = "🔑 Мой прокси"
+OLD_MY_PROXIES_BUTTON = "🔑 Мои прокси"
 MY_SUBSCRIPTION_BUTTON = "📅 Моя подписка"
 OLD_MY_SUBSCRIPTION_BUTTON = "⏳ Моя подписка"
 INSTRUCTION_BUTTON = "📖 Инструкция"

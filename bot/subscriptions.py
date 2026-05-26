@@ -58,7 +58,7 @@ async def expire_subscriptions(bot: Bot) -> None:
             await bot.send_message(
                 telegram_id,
                 "⏳ Срок подписки истёк, доступ отключён.\n\n"
-                "🔁 Чтобы продлить — нажмите /start → 💳 Купить доступ.",
+                "🔁 Чтобы продлить — нажмите /start → 🚀 Получить доступ.",
             )
         except Exception as exc:
             logging.warning("Failed to notify expired user %s: %s", telegram_id, exc)
