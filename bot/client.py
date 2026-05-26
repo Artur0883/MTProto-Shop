@@ -4,6 +4,8 @@ import logging
 
 from aiogram import F, Router
 from aiogram.filters import CommandStart, StateFilter
+from aiogram.fsm.context import FSMContext
+from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import CallbackQuery, Message, User
 
 from config import get_settings
@@ -25,15 +27,19 @@ from database import (
 )
 from keyboards import (
     BUY_BUTTON,
+    CLIENT_SUPPORT_BUTTON,
     CONNECT_BUTTON,
     DAYS_LEFT_BUTTON,
     HELP_BUTTON,
     INSTRUCTION_BUTTON,
+    LEGACY_BUY_BUTTON,
     MY_LINK_BUTTON,
+    MY_PROXY_BUTTON,
     MY_SUBSCRIPTION_BUTTON,
     OLD_BUY_BUTTON,
     OLD_DAYS_LEFT_BUTTON,
     OLD_MY_LINK_BUTTON,
+    OLD_MY_SUBSCRIPTION_BUTTON,
     SUPPORT_BUTTON,
     TRY_FREE_BUTTON,
     admin_pay_request_keyboard,
@@ -53,13 +59,18 @@ from tariffs import Tariff, get_tariff
 
 router = Router()
 
+
+class ClientSupportStates(StatesGroup):
+    waiting_message = State()
+
+
 HELP_CHECKLIST_TEXT = (
     "<b>🆘 Не подключается?</b>\n\n"
     "Проверьте 5 пунктов:\n"
     "1. Обновите Telegram до последней версии.\n"
     "2. Отключите другой VPN или proxy.\n"
     "3. Попробуйте другую сеть: Wi-Fi или мобильный интернет.\n"
-    "4. В разделе «⏳ Моя подписка» нажмите «🔄 Обновить ключ».\n"
+    "4. В разделе «📅 Моя подписка» нажмите «🔄 Обновить ключ».\n"
     "5. Если не помогло — напишите в поддержку."
 )
 INSTRUCTION_TEXTS = {
@@ -219,15 +230,23 @@ async def show_tariffs(message: Message) -> None:
     )
 
 
-async def send_support_request(message: Message, user_override: User | None = None) -> None:
+async def send_support_request(
+    message: Message,
+    state: FSMContext | None = None,
+    user_override: User | None = None,
+) -> None:
     settings = get_settings()
     user = user_override or message.from_user
     contact = settings.support_contact.strip()
     url = support_url(contact)
 
+    if state is not None:
+        await state.clear()
+
     if url:
         await message.answer(
             "<b>💬 Поддержка</b>\n\n"
+            f"Контакт: {escape(contact)}\n\n"
             "Нажмите кнопку ниже, чтобы открыть чат с поддержкой.",
             reply_markup=support_keyboard(url),
         )
@@ -262,6 +281,8 @@ async def send_support_request(message: Message, user_override: User | None = No
             "📝 Напишите ваш вопрос прямо в этот чат — оператор ответит здесь же.",
             reply_markup=client_menu(),
         )
+        if state is not None:
+            await state.set_state(ClientSupportStates.waiting_message)
         return
 
     await message.answer(
@@ -271,12 +292,13 @@ async def send_support_request(message: Message, user_override: User | None = No
 
 
 @router.message(CommandStart())
-async def start(message: Message) -> None:
+async def start(message: Message, state: FSMContext) -> None:
     settings = get_settings()
     user = message.from_user
     if user is None:
         return
 
+    await state.clear()
     await upsert_user(
         settings.database_path,
         telegram_id=user.id,
@@ -320,22 +342,26 @@ async def start(message: Message) -> None:
             "🎁 1 день бесплатно\n"
             "🔐 Индивидуальный ключ только для вас\n"
             "💬 Поддержка рядом\n\n"
-            "🎁 Нажмите «Попробовать бесплатно» — ключ выдадим за пару секунд."
+            "🛒 Нажмите «Купить доступ» и выберите пробный тариф — ключ выдадим за пару секунд."
         )
 
     await message.answer(text, reply_markup=client_menu())
 
 
 @router.message(F.text == TRY_FREE_BUTTON)
-async def try_free(message: Message) -> None:
+async def try_free(message: Message, state: FSMContext) -> None:
     user = message.from_user
     if user is None:
         return
+    await state.clear()
     await grant_free_trial(message, user)
 
 
-@router.message((F.text == BUY_BUTTON) | (F.text == OLD_BUY_BUTTON))
-async def buy_access(message: Message) -> None:
+@router.message(
+    (F.text == BUY_BUTTON) | (F.text == OLD_BUY_BUTTON) | (F.text == LEGACY_BUY_BUTTON)
+)
+async def buy_access(message: Message, state: FSMContext) -> None:
+    await state.clear()
     await show_tariffs(message)
 
 
@@ -385,18 +411,19 @@ async def disabled_client_tariff(callback: CallbackQuery) -> None:
 
 
 @router.callback_query(F.data == "client_support_inline")
-async def support_inline(callback: CallbackQuery) -> None:
+async def support_inline(callback: CallbackQuery, state: FSMContext) -> None:
     message = callback.message
     if message is None or not hasattr(message, "answer"):
         await callback.answer("Откройте меню командой /start.", show_alert=True)
         return
 
     await callback.answer()
-    await send_support_request(message, user_override=callback.from_user)
+    await send_support_request(message, state=state, user_override=callback.from_user)
 
 
 @router.message(F.text == INSTRUCTION_BUTTON)
-async def instruction(message: Message) -> None:
+async def instruction(message: Message, state: FSMContext) -> None:
+    await state.clear()
     await message.answer("Выберите устройство:", reply_markup=instructions_menu())
 
 
@@ -427,13 +454,19 @@ async def instruction_device(callback: CallbackQuery) -> None:
 
 
 @router.message((F.text == HELP_BUTTON) | (F.text == SUPPORT_BUTTON))
-async def help_section(message: Message) -> None:
+async def help_section(message: Message, state: FSMContext) -> None:
+    await state.clear()
     await message.answer(
         HELP_CHECKLIST_TEXT
         + "\n\n<b>Связаться с поддержкой:</b>\n"
         "Нажмите кнопку ниже.",
         reply_markup=help_menu(),
     )
+
+
+@router.message(F.text == CLIENT_SUPPORT_BUTTON)
+async def client_support(message: Message, state: FSMContext) -> None:
+    await send_support_request(message, state=state)
 
 
 @router.callback_query(F.data == "client_troubleshoot")
@@ -608,13 +641,15 @@ async def send_my_link(message: Message, telegram_id: int) -> None:
 
 @router.message(
     (F.text == CONNECT_BUTTON)
+    | (F.text == MY_PROXY_BUTTON)
     | (F.text == MY_LINK_BUTTON)
     | (F.text == OLD_MY_LINK_BUTTON)
 )
-async def my_link(message: Message) -> None:
+async def my_link(message: Message, state: FSMContext) -> None:
     user = message.from_user
     if user is None:
         return
+    await state.clear()
     await send_my_link(message, user.id)
 
 
@@ -631,15 +666,17 @@ async def my_link_inline(callback: CallbackQuery) -> None:
 
 @router.message(
     (F.text == MY_SUBSCRIPTION_BUTTON)
+    | (F.text == OLD_MY_SUBSCRIPTION_BUTTON)
     | (F.text == DAYS_LEFT_BUTTON)
     | (F.text == OLD_DAYS_LEFT_BUTTON)
 )
-async def show_days_left(message: Message) -> None:
+async def show_days_left(message: Message, state: FSMContext) -> None:
     settings = get_settings()
     user = message.from_user
     if user is None:
         return
 
+    await state.clear()
     subscription = await get_latest_subscription_by_telegram_id(
         settings.database_path,
         user.id,
@@ -670,7 +707,7 @@ async def show_days_left(message: Message) -> None:
     status_text = "✅ Статус: активна" if has_active else "🔒 Статус: доступ неактивен"
 
     await message.answer(
-        "<b>⏳ Моя подписка</b>\n\n"
+        "<b>📅 Моя подписка</b>\n\n"
         f"{status_text}\n"
         f"📦 Тариф: {escape(tariff_title)}\n"
         f"📅 Истекает: {format_datetime(subscription['expires_at'])}\n"
@@ -738,29 +775,17 @@ async def rotate_client_key(callback: CallbackQuery) -> None:
     )
 
 
-@router.message(StateFilter(None), F.text)
-async def relay_client_to_admin(message: Message) -> None:
+@router.message(ClientSupportStates.waiting_message, F.text)
+async def relay_client_to_admin(message: Message, state: FSMContext) -> None:
     try:
         settings = get_settings()
         user = message.from_user
         if settings.admin_id is None or user is None or user.id == settings.admin_id:
-            return
-        if message.text in {
-            TRY_FREE_BUTTON,
-            BUY_BUTTON,
-            OLD_BUY_BUTTON,
-            CONNECT_BUTTON,
-            MY_LINK_BUTTON,
-            OLD_MY_LINK_BUTTON,
-            MY_SUBSCRIPTION_BUTTON,
-            DAYS_LEFT_BUTTON,
-            OLD_DAYS_LEFT_BUTTON,
-            INSTRUCTION_BUTTON,
-            HELP_BUTTON,
-            SUPPORT_BUTTON,
-        }:
+            await state.clear()
             return
         if message.text.startswith("/"):
+            await state.clear()
+            await message.answer("Выберите действие в меню ниже.", reply_markup=client_menu())
             return
 
         username = f"@{escape(user.username)}" if user.username else "без username"
@@ -783,12 +808,28 @@ async def relay_client_to_admin(message: Message) -> None:
             copied_message.message_id,
             user.id,
         )
+        await state.clear()
+        await message.answer(
+            "✅ Сообщение отправлено оператору.\n\nВыберите действие в меню ниже.",
+            reply_markup=client_menu(),
+        )
     except Exception:
         logging.exception("Failed to relay client support message to admin")
+        await state.clear()
         try:
             await message.answer(
                 "❌ Не получилось передать сообщение оператору. "
-                "Попробуйте позже или используйте /start."
+                "Попробуйте позже.",
+                reply_markup=client_menu(),
             )
         except Exception:
             pass
+
+
+@router.message(StateFilter(None), F.text)
+async def unknown_client_text(message: Message) -> None:
+    settings = get_settings()
+    user = message.from_user
+    if user is None or user.id == settings.admin_id or message.text.startswith("/"):
+        return
+    await message.answer("Выберите действие в меню ниже.", reply_markup=client_menu())

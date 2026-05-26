@@ -73,7 +73,7 @@ def get_settings() -> Settings:
         admin_id=admin_id,
         server_host=os.getenv("SERVER_HOST", "SERVER_HOST"),
         proxy_port=int(os.getenv("PROXY_PORT", "443")),
-        tls_domain=os.getenv("TLS_DOMAIN", "www.cloudflare.com").strip(),
+        tls_domain=os.getenv("TLS_DOMAIN", "protovich.ru").strip(),
         proxy_core=os.getenv("PROXY_CORE", "telemt").strip().lower() or "telemt",
         telemt_api_url=os.getenv("TELEMT_API_URL", "http://mtproto:9091").strip().rstrip("/"),
         telemt_system_user=os.getenv("TELEMT_SYSTEM_USER", "shop_bootstrap").strip() or "shop_bootstrap",

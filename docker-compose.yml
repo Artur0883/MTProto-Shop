@@ -29,7 +29,7 @@ services:
       - .env
     environment:
       PROXY_PORT: ${PROXY_PORT:-443}
-      TLS_DOMAIN: ${TLS_DOMAIN:-www.cloudflare.com}
+      TLS_DOMAIN: ${TLS_DOMAIN:-protovich.ru}
     ports:
       - "${PROXY_PORT:-443}:443/tcp"
     expose:
@@ -44,7 +44,8 @@ services:
     container_name: mtproto-shop-bot
     restart: unless-stopped
     depends_on:
-      - mtproto
+      mtproto:
+        condition: service_healthy
     logging:
       driver: json-file
       options:
@@ -69,6 +70,9 @@ services:
       dockerfile: bot/Dockerfile
     container_name: mtproto-shop-support-bot
     restart: unless-stopped
+    depends_on:
+      mtproto:
+        condition: service_healthy
     logging:
       driver: json-file
       options:

@@ -5,10 +5,13 @@ from tariffs import TARIFFS
 
 
 TRY_FREE_BUTTON = "🎁 Попробовать бесплатно"
-BUY_BUTTON = "💳 Купить доступ"
-OLD_BUY_BUTTON = "🚀 Купить доступ"
+BUY_BUTTON = "🛒 Купить доступ"
+OLD_BUY_BUTTON = "💳 Купить доступ"
+LEGACY_BUY_BUTTON = "🚀 Купить доступ"
 CONNECT_BUTTON = "🔐 Подключиться"
-MY_SUBSCRIPTION_BUTTON = "⏳ Моя подписка"
+MY_PROXY_BUTTON = "🔑 Мой прокси"
+MY_SUBSCRIPTION_BUTTON = "📅 Моя подписка"
+OLD_MY_SUBSCRIPTION_BUTTON = "⏳ Моя подписка"
 INSTRUCTION_BUTTON = "📖 Инструкция"
 HELP_BUTTON = "🆘 Помощь"
 MY_LINK_BUTTON = "🔐 Подключиться"
@@ -16,6 +19,7 @@ OLD_MY_LINK_BUTTON = "🔗 Моя ссылка"
 DAYS_LEFT_BUTTON = "⏳ Срок доступа"
 OLD_DAYS_LEFT_BUTTON = "📅 Осталось дней"
 SUPPORT_BUTTON = "💬 Поддержка"
+CLIENT_SUPPORT_BUTTON = "🆘 Поддержка"
 
 USERS_BUTTON = "👥 Пользователи"
 ISSUE_ACCESS_BUTTON = "➕ Выдать доступ"
@@ -31,9 +35,9 @@ BACK_BUTTON = "⬅️ Назад"
 def client_menu() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(
         keyboard=[
-            [KeyboardButton(text=TRY_FREE_BUTTON), KeyboardButton(text=BUY_BUTTON)],
-            [KeyboardButton(text=CONNECT_BUTTON), KeyboardButton(text=MY_SUBSCRIPTION_BUTTON)],
-            [KeyboardButton(text=INSTRUCTION_BUTTON), KeyboardButton(text=HELP_BUTTON)],
+            [KeyboardButton(text=BUY_BUTTON)],
+            [KeyboardButton(text=MY_PROXY_BUTTON), KeyboardButton(text=MY_SUBSCRIPTION_BUTTON)],
+            [KeyboardButton(text=CLIENT_SUPPORT_BUTTON)],
         ],
         resize_keyboard=True,
         input_field_placeholder="Выберите действие",

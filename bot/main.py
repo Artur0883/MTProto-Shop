@@ -28,8 +28,8 @@ def _wait_for_telemt(api_url: str, attempts: int = 30, delay: float = 2.0) -> No
         except Exception as exc:
             last_error = exc
         time.sleep(delay)
-    logging.warning(
-        "TeleMT API still not responding after %ss: %s", attempts * delay, last_error
+    raise RuntimeError(
+        f"TeleMT API still not responding after {attempts * delay}s: {last_error}"
     )
 
 
@@ -76,7 +76,7 @@ async def main() -> None:
         runtime.STARTED_AT = datetime.now(UTC)
         worker_task = asyncio.create_task(subscription_worker(bot))
         heartbeat_task = asyncio.create_task(bot_heartbeat_loop())
-        logging.info("Telegram Bot MVP is running")
+        logging.info("Start polling: Telegram Bot MVP is running")
 
     async def on_shutdown() -> None:
         if worker_task is not None:

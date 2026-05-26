@@ -235,10 +235,28 @@ read_proxy_port() {
 }
 
 read_tls_domain() {
+  local choice
   while true; do
-    echo "Введите TLS_DOMAIN для маскировки [www.cloudflare.com]:"
-    read -r -p "> " WIZARD_TLS_DOMAIN
-    WIZARD_TLS_DOMAIN="${WIZARD_TLS_DOMAIN:-www.cloudflare.com}"
+    echo "Выберите TLS_DOMAIN для маскировки:"
+    echo
+    echo "1) protovich.ru — рекомендовано, как в успешной установке TeleMT"
+    echo "2) www.cloudflare.com"
+    echo "3) Ввести свой домен"
+    echo
+    read -r -p "Ваш выбор [1]: " choice
+    choice="${choice:-1}"
+    case "$choice" in
+      1) WIZARD_TLS_DOMAIN="protovich.ru" ;;
+      2) WIZARD_TLS_DOMAIN="www.cloudflare.com" ;;
+      3)
+        echo "Введите свой TLS_DOMAIN для маскировки:"
+        read -r -p "> " WIZARD_TLS_DOMAIN
+        ;;
+      *)
+        echo -e "${RED}Выберите пункт от 1 до 3.${NC}"
+        continue
+        ;;
+    esac
     if [[ "$WIZARD_TLS_DOMAIN" =~ ^[A-Za-z0-9.-]+$ ]]; then
       return 0
     fi
@@ -341,12 +359,19 @@ write_telemt_config() {
     echo -e "${RED}Не найден шаблон telemt/config.example.toml.${NC}"
     return 1
   fi
-  local secret
+  local secret server_host proxy_port tls_domain
+  server_host="$(get_env_value SERVER_HOST)"
+  proxy_port="$(get_env_value PROXY_PORT)"
+  tls_domain="$(get_env_value TLS_DOMAIN)"
+  if [[ -z "$server_host" || -z "$proxy_port" || -z "$tls_domain" ]]; then
+    echo -e "${RED}В .env должны быть заполнены SERVER_HOST, PROXY_PORT и TLS_DOMAIN.${NC}"
+    return 1
+  fi
   secret="$(openssl rand -hex 16)"
   sed \
-    -e "s|__SERVER_HOST__|${WIZARD_SERVER_HOST}|g" \
-    -e "s|__PROXY_PORT__|${WIZARD_PROXY_PORT}|g" \
-    -e "s|__TLS_DOMAIN__|${WIZARD_TLS_DOMAIN}|g" \
+    -e "s|__SERVER_HOST__|${server_host}|g" \
+    -e "s|__PROXY_PORT__|${proxy_port}|g" \
+    -e "s|__TLS_DOMAIN__|${tls_domain}|g" \
     -e "s|__SHOP_BOOTSTRAP_SECRET__|${secret}|g" \
     telemt/config.example.toml > telemt/config.toml
   chown 65532:65532 telemt telemt/config.toml
@@ -360,6 +385,11 @@ container_is_running() {
   [[ "$(docker inspect -f '{{.State.Status}}' "$name" 2>/dev/null || true)" == "running" ]]
 }
 
+container_is_healthy() {
+  local name="$1"
+  [[ "$(docker inspect -f '{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}' "$name" 2>/dev/null || true)" == "healthy" ]]
+}
+
 open_custom_proxy_port() {
   local port="$1"
   if command -v ufw >/dev/null 2>&1 && [[ "$port" != "443" ]]; then
@@ -370,44 +400,72 @@ open_custom_proxy_port() {
 
 start_and_verify_installation() {
   local attempt
-  echo -e "${BLUE}Собираю и запускаю контейнеры...${NC}"
-  $COMPOSE_CMD up -d --build --force-recreate
-  $COMPOSE_CMD ps
+  echo -e "${BLUE}Этап 1/2: запускаю TeleMT...${NC}"
+  $COMPOSE_CMD up -d --force-recreate mtproto
 
   if ! container_is_running "mtproto-shop-proxy"; then
     echo -e "${RED}Контейнер mtproto-shop-proxy не запущен. Установка не завершена.${NC}"
+    $COMPOSE_CMD logs --tail=100 mtproto || true
     return 1
   fi
 
+  echo -e "${BLUE}Собираю образ bot для проверки TeleMT из compose-сети...${NC}"
+  $COMPOSE_CMD build bot
+
   echo -e "${BLUE}Ожидаю готовности TeleMT API...${NC}"
   for attempt in {1..30}; do
-    if $COMPOSE_CMD exec -T bot python -c \
+    if $COMPOSE_CMD run --rm --no-deps bot python -c \
       "import urllib.request; urllib.request.urlopen('http://mtproto:9091/v1/users', timeout=2).read()" \
       >/dev/null 2>&1; then
-      echo -e "${GREEN}✅ TeleMT API доступен из контейнера бота.${NC}"
+      echo -e "${GREEN}✅ TeleMT запущен${NC}"
+      echo -e "${GREEN}✅ TeleMT API работает${NC}"
+      echo -e "${GREEN}✅ TLS/ee ссылка создаётся${NC}"
       break
     fi
     if [[ "$attempt" -eq 30 ]]; then
       echo -e "${RED}TeleMT API не ответил за 60 секунд. Последние строки логов:${NC}"
-      $COMPOSE_CMD logs --tail=80 mtproto || true
+      $COMPOSE_CMD logs --tail=100 mtproto || true
       return 1
     fi
     sleep 2
   done
 
-  if ! container_is_running "mtproto-shop-bot"; then
-    echo -e "${RED}Основной Telegram-бот не запущен. Последние строки логов:${NC}"
-    $COMPOSE_CMD logs --tail=80 bot || true
-    echo -e "${RED}Установка не считается успешной, пока bot не будет работать.${NC}"
-    return 1
-  fi
-  echo -e "${GREEN}✅ Основной Telegram-бот запущен.${NC}"
+  echo -e "${BLUE}Этап 2/2: запускаю Telegram-ботов...${NC}"
+  $COMPOSE_CMD up -d --build bot support_bot
+
+  echo -e "${BLUE}Ожидаю healthy-статус основного Telegram-бота...${NC}"
+  for attempt in {1..60}; do
+    if container_is_running "mtproto-shop-bot" && container_is_healthy "mtproto-shop-bot"; then
+      echo -e "${GREEN}✅ Основной Telegram-бот запущен и healthy.${NC}"
+      break
+    fi
+    if [[ "$attempt" -eq 60 ]]; then
+      echo -e "${RED}Основной Telegram-бот не получил healthy-статус. Последние строки логов:${NC}"
+      $COMPOSE_CMD logs --tail=100 bot || true
+      return 1
+    fi
+    sleep 2
+  done
 
   if [[ -n "$WIZARD_SUPPORT_BOT_TOKEN" ]] && ! container_is_running "mtproto-shop-support-bot"; then
     echo -e "${RED}Токен поддержки указан, но контейнер support_bot не запущен.${NC}"
-    $COMPOSE_CMD logs --tail=80 support_bot || true
+    $COMPOSE_CMD logs --tail=100 support_bot || true
     return 1
   fi
+
+  echo -e "${BLUE}Проверяю запуск polling в логах бота...${NC}"
+  for attempt in {1..15}; do
+    if $COMPOSE_CMD logs --tail=100 bot 2>&1 | grep -q "Start polling"; then
+      echo -e "${GREEN}✅ В логах bot найден Start polling.${NC}"
+      return 0
+    fi
+    if [[ "$attempt" -eq 15 ]]; then
+      echo -e "${RED}В логах bot не найден Start polling. Последние строки логов:${NC}"
+      $COMPOSE_CMD logs --tail=100 bot || true
+      return 1
+    fi
+    sleep 2
+  done
 }
 
 first_setup_wizard() {
@@ -438,8 +496,14 @@ first_setup_wizard() {
   WIZARD_BOT_USERNAME="$TELEGRAM_BOT_USERNAME"
   echo -e "${GREEN}✅ Telegram API проверен: @${WIZARD_BOT_USERNAME}${NC}"
   echo
+  $COMPOSE_CMD ps
+  echo
   echo "=================================================="
   echo "✅ Установка завершена"
+  echo "✅ TeleMT работает"
+  echo "✅ Telegram-бот работает"
+  echo "✅ Откройте Telegram-бота и нажмите /start один раз"
+  echo "✅ После этого появятся кнопки меню"
   echo "=================================================="
   echo
   echo "Проект установлен в:"
@@ -467,8 +531,8 @@ first_setup_wizard() {
   echo
   echo "Теперь открой Telegram:"
   echo "1. Найди своего бота"
-  echo "2. Напиши /start"
-  echo "3. Потом напиши /admin"
+  echo "2. Нажми /start один раз, чтобы открыть постоянное клиентское меню"
+  echo "3. Для админки отдельно напиши /admin"
   echo
   echo "Если бот не отвечает:"
   echo "mtp"
@@ -708,6 +772,8 @@ check_installation() {
         echo -e "${YELLOW}Последние 50 строк логов bot:${NC}"
         docker compose logs --tail=50 bot || true
       fi
+    elif ! container_is_healthy "mtproto-shop-bot"; then
+      errors+=("Контейнер mtproto-shop-bot не имеет healthy-статуса.")
     fi
     if [[ -n "${support_token:-}" ]] && ! container_is_running "mtproto-shop-support-bot"; then
       errors+=("SUPPORT_BOT_TOKEN задан, но контейнер mtproto-shop-support-bot не запущен.")
@@ -741,7 +807,8 @@ check_installation() {
 
   echo -e "${GREEN}✅ Проверка завершена успешно.${NC}"
   echo -e "${GREEN}✅ Telegram-бот запущен.${NC}"
-  echo -e "${GREEN}✅ Откройте Telegram и напишите боту /start.${NC}"
+  echo -e "${GREEN}✅ Откройте Telegram-бота и нажмите /start один раз.${NC}"
+  echo -e "${GREEN}✅ После этого используйте постоянные кнопки меню.${NC}"
   echo -e "${GREEN}✅ Для админки напишите /admin.${NC}"
 }
 
