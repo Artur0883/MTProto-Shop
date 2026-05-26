@@ -761,16 +761,21 @@ update_source_code() {
       cp -p manage.sh "$manage_backup"
     fi
     stash_name="Автобэкап перед обновлением MTProto-Shop ${timestamp}"
-    if ! git stash push -u -m "$stash_name" -- . \
-      ':(exclude).env' \
-      ':(exclude)data' \
-      ':(exclude)data/**' \
-      ':(exclude)backups' \
-      ':(exclude)backups/**' \
-      ':(exclude)logs' \
-      ':(exclude)logs/**' \
-      ':(exclude)telemt/config.toml' \
-      ':(exclude)telemt/*.tmp'; then
+    local -a stash_paths=() staged_paths=()
+    mapfile -d '' -t stash_paths < <(git ls-files -m -o --exclude-standard -z -- .)
+    mapfile -d '' -t staged_paths < <(git diff --cached --name-only --no-renames -z -- .)
+    stash_paths+=("${staged_paths[@]}")
+
+    if (( ${#stash_paths[@]} == 0 )); then
+      echo -e "${RED}❌ Git сообщил о локальных изменениях, но файлов для git stash не найдено. Обновление отменено.${NC}"
+      echo "Backup-файлы:"
+      echo "  ${status_backup}"
+      echo "  ${diff_backup}"
+      [[ -z "${manage_backup:-}" ]] || echo "  ${manage_backup}"
+      return 1
+    fi
+
+    if ! git stash push -u -m "$stash_name" -- "${stash_paths[@]}"; then
       echo -e "${RED}❌ Не удалось сохранить локальные изменения в git stash. Обновление отменено.${NC}"
       echo "Backup-файлы:"
       echo "  ${status_backup}"
