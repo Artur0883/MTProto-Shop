@@ -721,18 +721,81 @@ update_telemt() {
 }
 
 update_source_code() {
+  local changes remaining_changes timestamp status_backup diff_backup manage_backup stash_name
+
   if [[ ! -d .git ]]; then
     echo -e "${YELLOW}Git-репозиторий не найден, пропускаю загрузку обновлений.${NC}"
     return 0
   fi
 
   echo -e "${BLUE}Загружаю обновления из GitHub...${NC}"
-  if ! git pull --ff-only origin main; then
-    echo -e "${RED}Не удалось обновить код. Сборка старой версии отменена.${NC}"
-    echo "Проверьте файлы, мешающие обновлению: git status --short"
-    echo "После исправления снова выберите пункт 2."
+  changes="$(git status --short --untracked-files=all)"
+  if [[ -n "$changes" ]]; then
+    timestamp="$(date +%Y-%m-%d_%H-%M-%S)"
+    mkdir -p backups
+    status_backup="backups/git-status-before-update-${timestamp}.txt"
+    diff_backup="backups/git-diff-before-update-${timestamp}.diff"
+    printf '%s\n' "$changes" > "$status_backup"
+    git diff --binary HEAD -- > "$diff_backup"
+
+    echo -e "${YELLOW}⚠️ Найдены локальные изменения.${NC}"
+    if [[ -n "$(git status --short -- manage.sh)" ]] && [[ -f manage.sh ]]; then
+      manage_backup="backups/manage.sh-before-update-${timestamp}"
+      cp -p manage.sh "$manage_backup"
+    fi
+    stash_name="Автобэкап перед обновлением MTProto-Shop ${timestamp}"
+    if ! git stash push -u -m "$stash_name" -- . \
+      ':(exclude).env' \
+      ':(exclude)data' \
+      ':(exclude)data/**' \
+      ':(exclude)backups' \
+      ':(exclude)backups/**' \
+      ':(exclude)logs' \
+      ':(exclude)logs/**' \
+      ':(exclude)telemt/config.toml' \
+      ':(exclude)telemt/*.tmp'; then
+      echo -e "${RED}❌ Не удалось сохранить локальные изменения в git stash. Обновление отменено.${NC}"
+      echo "Backup-файлы:"
+      echo "  ${status_backup}"
+      echo "  ${diff_backup}"
+      [[ -z "${manage_backup:-}" ]] || echo "  ${manage_backup}"
+      return 1
+    fi
+    echo -e "${GREEN}✅ Локальные изменения сохранены в backup и git stash.${NC}"
+    echo "Backup-файлы:"
+    echo "  ${status_backup}"
+    echo "  ${diff_backup}"
+    [[ -z "${manage_backup:-}" ]] || echo "  ${manage_backup}"
+
+    remaining_changes="$(git status --short --untracked-files=no)"
+    if [[ -n "$remaining_changes" ]]; then
+      echo -e "${RED}❌ После сохранения остались защищённые локальные изменения. Автоматическое обновление отменено.${NC}"
+      printf '%s\n' "$remaining_changes"
+      echo "Проверьте сохранённые изменения командой: git stash list"
+      return 1
+    fi
+  fi
+
+  if ! git fetch origin main || ! git pull --ff-only origin main; then
+    echo -e "${RED}❌ Не удалось обновить код из GitHub.${NC}"
+    git status --short
+    if [[ -n "${status_backup:-}" ]]; then
+      echo "Backup-файлы:"
+      echo "  ${status_backup}"
+      echo "  ${diff_backup}"
+      [[ -z "${manage_backup:-}" ]] || echo "  ${manage_backup}"
+    else
+      echo "Перед обновлением локальных изменений не было, backup не создавался."
+    fi
+    echo "Для ручной проверки сохранённых изменений выполните: git stash list"
     return 1
   fi
+
+  if ! chmod +x manage.sh install.sh; then
+    echo -e "${RED}❌ Код обновлён, но не удалось назначить права запуска manage.sh и install.sh.${NC}"
+    return 1
+  fi
+  echo -e "${GREEN}✅ Код успешно обновлён из GitHub.${NC}"
 }
 
 install_or_update() {
