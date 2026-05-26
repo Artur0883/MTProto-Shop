@@ -2,6 +2,8 @@ import asyncio
 from datetime import UTC, datetime
 import logging
 import sys
+import time
+import urllib.request
 
 from aiogram import Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
@@ -11,9 +13,24 @@ from admin import router as admin_router
 from client import router as client_router
 from config import get_settings
 from database import init_db
-from proxy_manager import ensure_runtime_config, require_supported_proxy_core
 import runtime
 from subscriptions import subscription_worker
+
+
+def _wait_for_telemt(api_url: str, attempts: int = 30, delay: float = 2.0) -> None:
+    last_error: Exception | None = None
+    for _ in range(attempts):
+        try:
+            request = urllib.request.Request(f"{api_url}/v1/users", method="GET")
+            with urllib.request.urlopen(request, timeout=2.0) as response:
+                if response.status < 500:
+                    return
+        except Exception as exc:
+            last_error = exc
+        time.sleep(delay)
+    logging.warning(
+        "TeleMT API still not responding after %ss: %s", attempts * delay, last_error
+    )
 
 
 async def main() -> None:
@@ -24,8 +41,7 @@ async def main() -> None:
         stream=sys.stdout,
     )
 
-    require_supported_proxy_core()
-    ensure_runtime_config(settings.proxy_config_path)
+    _wait_for_telemt(settings.telemt_api_url)
 
     if not settings.bot_token:
         raise RuntimeError("BOT_TOKEN is required")
@@ -81,7 +97,7 @@ async def main() -> None:
     dp.startup.register(on_startup)
     dp.shutdown.register(on_shutdown)
 
-    logging.info("Proxy config path: %s", settings.proxy_config_path)
+    logging.info("TeleMT API URL: %s", settings.telemt_api_url)
     logging.info("Server host: %s, proxy port: %s", settings.server_host, settings.proxy_port)
     logging.info("Database path: %s", settings.database_path)
 

@@ -1,15 +1,12 @@
 import argparse
 import asyncio
+import json
 import logging
-import os
 import re
-import runpy
 import secrets
-import shutil
-import tempfile
-from datetime import UTC, datetime
-from pathlib import Path
-from urllib.parse import urlencode
+import urllib.error
+import urllib.request
+from urllib.parse import parse_qs, urlencode, urlparse
 
 from config import get_settings
 
@@ -17,46 +14,12 @@ from config import get_settings
 SECRET_RE = re.compile(r"^[0-9a-f]{32}$")
 CLIENT_RE = re.compile(r"^[A-Za-z0-9_.-]{1,64}$")
 SECURE_SECRET_PREFIX = "dd"
-TLS_SECRET_PREFIX = "ee"  # ee + 32 hex client secret + hex(UTF-8 TLS domain)
-SUPPORTED_PROXY_CORE = "alexbers"
+TLS_SECRET_PREFIX = "ee"
+DEFAULT_TIMEOUT = 5.0
 
 
 class ClientNotFoundError(ValueError):
     pass
-
-
-def get_example_config_path(config_path: Path) -> Path:
-    return config_path.with_name("config.example.py")
-
-
-def set_runtime_config_permissions(config_path: Path) -> None:
-    os.chmod(config_path, 0o644)
-
-
-def require_supported_proxy_core() -> None:
-    core = os.getenv("PROXY_CORE", SUPPORTED_PROXY_CORE).strip().lower()
-    if core != SUPPORTED_PROXY_CORE:
-        raise RuntimeError(
-            "TeleMT adapter is not implemented; set PROXY_CORE=alexbers "
-            "before managing proxy clients"
-        )
-
-
-def ensure_runtime_config(config_path: Path) -> None:
-    if config_path.exists():
-        set_runtime_config_permissions(config_path)
-        return
-
-    example_path = get_example_config_path(config_path)
-    if not example_path.exists():
-        raise FileNotFoundError(
-            f"runtime config is missing and template was not found: {example_path}"
-        )
-
-    config_path.parent.mkdir(parents=True, exist_ok=True)
-    shutil.copyfile(example_path, config_path)
-    set_runtime_config_permissions(config_path)
-    logging.info("Created runtime proxy config from template: %s", config_path)
 
 
 def mask_secret(secret: str) -> str:
@@ -67,84 +30,6 @@ def mask_secret(secret: str) -> str:
 
 def generate_secret() -> str:
     return secrets.token_hex(16)
-
-
-def load_users(config_path: Path) -> dict[str, str]:
-    ensure_runtime_config(config_path)
-
-    data = runpy.run_path(str(config_path))
-    users = data.get("USERS", {})
-    if not isinstance(users, dict):
-        raise ValueError("USERS in proxy config must be a dict")
-
-    return {str(name): str(secret).lower() for name, secret in users.items()}
-
-
-def request_proxy_reload() -> None:
-    try:
-        settings = get_settings()
-        sentinel_path = settings.database_path.parent / "proxy.reload.request"
-        sentinel_path.parent.mkdir(parents=True, exist_ok=True)
-        sentinel_path.write_text(datetime.now(UTC).isoformat(), encoding="utf-8")
-    except Exception as exc:
-        logging.warning("proxy reload sentinel not written: %s", exc)
-
-
-def write_config(config_path: Path, users: dict[str, str]) -> None:
-    ensure_runtime_config(config_path)
-    if os.name != "nt":
-        for stale in config_path.parent.glob("tmp*.py"):
-            try:
-                stale.unlink()
-            except OSError:
-                pass
-    config_path.parent.mkdir(parents=True, exist_ok=True)
-    sorted_users = dict(sorted(users.items(), key=lambda item: item[0]))
-    users_lines = "\n".join(
-        f'    "{name}": "{secret}",' for name, secret in sorted_users.items()
-    )
-    if users_lines:
-        users_block = "{\n" + users_lines + "\n}"
-    else:
-        users_block = "{}"
-
-    content = f'''import os
-
-PORT = int(os.getenv("PROXY_PORT", "443"))
-
-USERS = {users_block}
-
-MODES = {{
-    "classic": False,
-    "secure": True,
-    "tls": True,
-}}
-
-TLS_DOMAIN = os.getenv("TLS_DOMAIN", "www.cloudflare.com")
-'''
-
-    if os.name == "nt":
-        config_path.write_text(content, encoding="utf-8", newline="\n")
-        set_runtime_config_permissions(config_path)
-    else:
-        fd, tmp_name = tempfile.mkstemp(
-            prefix="tmp",
-            suffix=".py",
-            dir=str(config_path.parent),
-            text=True,
-        )
-        tmp_path = Path(tmp_name)
-
-        try:
-            with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as tmp_file:
-                tmp_file.write(content)
-            os.replace(tmp_path, config_path)
-            set_runtime_config_permissions(config_path)
-        finally:
-            if tmp_path.exists():
-                tmp_path.unlink()
-
-    request_proxy_reload()
 
 
 def validate_client_id(client_id: str) -> None:
@@ -184,56 +69,149 @@ def build_tls_proxy_link(
     return f"tg://proxy?{params}"
 
 
-def create_secret(client_id: str, provided_secret: str | None = None) -> str:
+def _api_request(
+    method: str, path: str, body: dict | None = None
+) -> dict | list | None:
     settings = get_settings()
-    require_supported_proxy_core()
+    url = f"{settings.telemt_api_url}{path}"
+    data = json.dumps(body).encode("utf-8") if body is not None else None
+    headers = {"Content-Type": "application/json"} if body is not None else {}
+    request = urllib.request.Request(url, data=data, method=method, headers=headers)
+    try:
+        with urllib.request.urlopen(request, timeout=DEFAULT_TIMEOUT) as response:
+            raw = response.read()
+            if not raw:
+                return None
+            try:
+                return json.loads(raw)
+            except json.JSONDecodeError as exc:
+                raise RuntimeError(
+                    f"telemt API {method} {path} returned invalid JSON"
+                ) from exc
+    except urllib.error.HTTPError as exc:
+        if exc.code == 404:
+            raise ClientNotFoundError(f"telemt 404 for {method} {path}") from exc
+        raise RuntimeError(
+            f"telemt API {method} {path} failed: {exc.code} {exc.reason}"
+        ) from exc
+    except urllib.error.URLError as exc:
+        raise RuntimeError(
+            f"telemt API {method} {path} unreachable: {exc.reason}"
+        ) from exc
+
+
+def _response_data(response: object) -> object:
+    if isinstance(response, dict) and "data" in response:
+        return response["data"]
+    return response
+
+
+def _secret_from_link(link: str) -> str | None:
+    secret_values = parse_qs(urlparse(link).query).get("secret", [])
+    if not secret_values:
+        return None
+    public_secret = secret_values[0].lower()
+    if public_secret.startswith((SECURE_SECRET_PREFIX, TLS_SECRET_PREFIX)):
+        secret = public_secret[2:34]
+    else:
+        secret = public_secret[:32]
+    return secret if SECRET_RE.fullmatch(secret) else None
+
+
+def _extract_secret(entry: object) -> str | None:
+    if entry is None:
+        return None
+    if isinstance(entry, str):
+        candidate = entry.lower()
+        if SECRET_RE.fullmatch(candidate):
+            return candidate
+        return _secret_from_link(entry)
+    if isinstance(entry, dict):
+        for key in ("secret", "client_secret"):
+            value = entry.get(key)
+            if isinstance(value, str) and SECRET_RE.fullmatch(value.lower()):
+                return value.lower()
+        for key in ("data", "user"):
+            value = _extract_secret(entry.get(key))
+            if value:
+                return value
+        links = entry.get("links")
+        if isinstance(links, dict):
+            for mode in ("tls", "secure", "classic"):
+                values = links.get(mode) or []
+                if isinstance(values, list):
+                    for link in values:
+                        if isinstance(link, str):
+                            value = _secret_from_link(link)
+                            if value:
+                                return value
+    return None
+
+
+def _extract_tls_link(entry: object) -> str | None:
+    if isinstance(entry, dict):
+        for key in ("data", "user"):
+            link = _extract_tls_link(entry.get(key))
+            if link:
+                return link
+        links = entry.get("links")
+        if isinstance(links, dict):
+            tls_links = links.get("tls") or []
+            if isinstance(tls_links, list) and tls_links:
+                if isinstance(tls_links[0], str):
+                    return tls_links[0]
+    return None
+
+
+def create_secret(client_id: str, provided_secret: str | None = None) -> str:
     validate_client_id(client_id)
     secret = (provided_secret or generate_secret()).lower()
     validate_secret(secret)
-
-    users = load_users(settings.proxy_config_path)
-    if client_id in users:
-        raise ValueError(f"client '{client_id}' already exists")
-
-    users[client_id] = secret
-    write_config(settings.proxy_config_path, users)
-    logging.info("Created secret for %s: %s", client_id, mask_secret(secret))
-    return secret
+    try:
+        existing = _api_request("GET", f"/v1/users/{client_id}")
+        current = _extract_secret(existing)
+        if current:
+            return current
+    except ClientNotFoundError:
+        pass
+    response = _api_request(
+        "POST", "/v1/users", {"username": client_id, "secret": secret}
+    )
+    effective_secret = _extract_secret(response) or secret
+    logging.info("Created secret for %s: %s", client_id, mask_secret(effective_secret))
+    return effective_secret
 
 
 def delete_secret(client_id: str) -> str:
-    settings = get_settings()
-    require_supported_proxy_core()
     validate_client_id(client_id)
-    users = load_users(settings.proxy_config_path)
-    if client_id not in users:
+    settings = get_settings()
+    if client_id == settings.telemt_system_user:
+        raise ValueError(f"refusing to delete system user '{client_id}'")
+    try:
+        existing = _api_request("GET", f"/v1/users/{client_id}")
+    except ClientNotFoundError:
         raise ClientNotFoundError(f"client '{client_id}' not found")
-
-    secret = users.pop(client_id)
-    write_config(settings.proxy_config_path, users)
+    secret = _extract_secret(existing) or ""
+    try:
+        _api_request("DELETE", f"/v1/users/{client_id}")
+    except ClientNotFoundError:
+        raise ClientNotFoundError(f"client '{client_id}' not found")
     logging.info("Deleted secret for %s: %s", client_id, mask_secret(secret))
     return secret
 
 
 def rotate_secret(client_id: str) -> str:
-    settings = get_settings()
-    require_supported_proxy_core()
     validate_client_id(client_id)
-    users = load_users(settings.proxy_config_path)
-    if client_id not in users:
-        raise ClientNotFoundError(f"client '{client_id}' not found")
-
-    old_secret = users[client_id]
     new_secret = generate_secret()
-    users[client_id] = new_secret
-    write_config(settings.proxy_config_path, users)
-    logging.info(
-        "Rotated secret for %s: %s -> %s",
-        client_id,
-        mask_secret(old_secret),
-        mask_secret(new_secret),
-    )
-    return new_secret
+    try:
+        response = _api_request(
+            "POST", f"/v1/users/{client_id}/rotate-secret", {"secret": new_secret}
+        )
+    except ClientNotFoundError:
+        raise ClientNotFoundError(f"client '{client_id}' not found")
+    secret = _extract_secret(response) or new_secret
+    logging.info("Rotated secret for %s: %s", client_id, mask_secret(secret))
+    return secret
 
 
 async def rotate_telegram_secret(telegram_id: int) -> str:
@@ -267,29 +245,49 @@ async def rotate_telegram_secret(telegram_id: int) -> str:
 
 
 def get_link(client_id: str) -> str:
-    settings = get_settings()
-    require_supported_proxy_core()
     validate_client_id(client_id)
-    users = load_users(settings.proxy_config_path)
-    if client_id not in users:
+    settings = get_settings()
+    try:
+        response = _api_request("GET", f"/v1/users/{client_id}")
+    except ClientNotFoundError:
         raise ClientNotFoundError(f"client '{client_id}' not found")
-
+    tls_link = _extract_tls_link(response)
+    if tls_link:
+        return tls_link
+    secret = _extract_secret(response) or ""
+    if not secret:
+        raise RuntimeError(f"client '{client_id}' has no TLS link or secret")
     return build_tls_proxy_link(
         settings.server_host,
         settings.proxy_port,
-        users[client_id],
+        secret,
         settings.tls_domain,
     )
 
 
 def list_clients() -> dict[str, str]:
     settings = get_settings()
-    require_supported_proxy_core()
-    return load_users(settings.proxy_config_path)
+    response = _response_data(_api_request("GET", "/v1/users") or [])
+    users = response.get("users") if isinstance(response, dict) else response
+    result: dict[str, str] = {}
+    if isinstance(users, list):
+        for entry in users:
+            if not isinstance(entry, dict):
+                continue
+            name = entry.get("username") or entry.get("name")
+            if not isinstance(name, str) or name == settings.telemt_system_user:
+                continue
+            result[name] = _extract_secret(entry) or ""
+    elif isinstance(users, dict):
+        for name, entry in users.items():
+            if name == settings.telemt_system_user:
+                continue
+            result[str(name)] = _extract_secret(entry) or ""
+    return result
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Manage mtprotoproxy USERS config")
+    parser = argparse.ArgumentParser(description="Manage TeleMT users via HTTP API")
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     create = subparsers.add_parser("create", help="create a secret for client")
@@ -325,22 +323,22 @@ def main() -> int:
             secret = create_secret(args.client_id, args.secret)
             print(get_link(args.client_id))
             print(f"created {args.client_id}: {mask_secret(secret)}")
-            print("apply changes: docker compose kill -s SIGUSR2 mtproto")
+            print("apply changes via TeleMT API")
         elif args.command == "delete":
             secret = delete_secret(args.client_id)
             print(f"deleted {args.client_id}: {mask_secret(secret)}")
-            print("apply changes: docker compose kill -s SIGUSR2 mtproto")
+            print("apply changes via TeleMT API")
         elif args.command == "rotate":
             secret = rotate_secret(args.client_id)
             print(get_link(args.client_id))
             print(f"rotated {args.client_id}: {mask_secret(secret)}")
-            print("apply changes: docker compose kill -s SIGUSR2 mtproto")
+            print("apply changes via TeleMT API")
         elif args.command == "rotate-telegram":
             secret = asyncio.run(rotate_telegram_secret(args.telegram_id))
             print(get_link(f"tg_{args.telegram_id}"))
             print(f"rotated tg_{args.telegram_id}: {mask_secret(secret)}")
             print("subscription secret in SQLite was updated")
-            print("apply changes: docker compose kill -s SIGUSR2 mtproto")
+            print("apply changes via TeleMT API")
         elif args.command == "link":
             print(get_link(args.client_id))
         elif args.command == "list":

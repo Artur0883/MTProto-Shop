@@ -4,9 +4,8 @@
 data/
 backups/
 logs/
-proxy/config/config.py
-proxy/config/tmp*
 telemt/config.toml
+telemt/*.tmp
 *.db
 *.sqlite
 *.log

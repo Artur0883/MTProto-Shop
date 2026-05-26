@@ -62,11 +62,7 @@ from tariffs import Tariff, get_tariff
 router = Router()
 
 
-SIGUSR2_NOTICE = (
-    "✅ Изменения proxy применяются автоматически в течение ~5 секунд.\n"
-    "Если watcher не установлен (mtp → 20), запустите вручную: "
-    "<code>docker compose kill -s SIGUSR2 mtproto</code>"
-)
+PROXY_APPLY_NOTICE = "✅ Ключ применён в TeleMT мгновенно через API."
 RESTART_REQUEST_PATH = Path("/app/data/restart.request")
 RESTART_COOLDOWN_SEC = 60
 SUPPORT_HEARTBEAT = Path("/app/data/heartbeats/support_bot.beat")
@@ -75,7 +71,7 @@ RESTART_LOG = Path("/app/data/restart.log")
 
 
 def access_disabled_text(note: str = "") -> str:
-    return f"✅ <b>Доступ отключён</b>{note}\n\n" + SIGUSR2_NOTICE
+    return f"✅ <b>Доступ отключён</b>{note}\n\n" + PROXY_APPLY_NOTICE
 
 
 def _format_uptime(delta_seconds: float) -> str:
@@ -802,7 +798,7 @@ async def admin_card_delete(callback: CallbackQuery) -> None:
     await message.edit_text(
         f"<b>⚠️ Удалить пользователя {telegram_id} полностью?</b>\n\n"
         "Будут удалены:\n"
-        "• ключ из proxy/config/config.py\n"
+        "• ключ пользователя в TeleMT\n"
         "• подписки в БД\n"
         "• запись пользователя в БД\n\n"
         "Действие необратимо.",
@@ -853,7 +849,7 @@ async def admin_card_delete_yes(callback: CallbackQuery) -> None:
     await delete_user_cascade(settings.database_path, telegram_id)
     await message.answer(
         f"🗑 <b>Пользователь {telegram_id} удалён полностью.</b>\n\n"
-        + SIGUSR2_NOTICE
+        + PROXY_APPLY_NOTICE
     )
     await callback.answer()
 

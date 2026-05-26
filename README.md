@@ -6,7 +6,7 @@
 
 - Telegram-бот на `aiogram 3.x`.
 - SQLite-база пользователей и подписок.
-- MTProto proxy через `alexbers/mtprotoproxy`.
+- MTProto proxy через TeleMT (`ghcr.io/telemt/telemt:latest`).
 - Один клиент = один личный `secret`.
 - Личная ссылка собирается на лету из `SERVER_HOST`, `PROXY_PORT` и `secret`.
 - В сообщениях клиента длинная ссылка/IP не показывается: клиент видит кнопку **🔐 Подключиться к MTProto**.
@@ -40,13 +40,13 @@ ADMIN_ID=123456789
 SERVER_HOST=1.2.3.4
 PROXY_PORT=443
 TLS_DOMAIN=www.cloudflare.com
-PROXY_CORE=alexbers
+PROXY_CORE=telemt
+TELEMT_API_URL=http://mtproto:9091
+TELEMT_SYSTEM_USER=shop_bootstrap
 SUPPORT_CONTACT=
 DATABASE_PATH=/app/data/shop.db
 PAYMENT_MODE=manual
 DEV_AUTO_ISSUE=false
-TELEMT_API_URL=http://mtproto:9091
-TELEMT_CONFIG_PATH=/app/telemt/config.toml
 ```
 
 `SUPPORT_CONTACT` можно оставить пустым. Тогда при нажатии **💬 Поддержка** обращение обрабатывает основной бот.
@@ -92,12 +92,12 @@ mtp
 1) 🧙 Первичная установка с нуля
 ```
 
-Мастер проверит токен через Telegram API, создаст `.env`, подготовит рабочий `alexbers` proxy и запустит контейнеры. TeleMT показан в выборе ядра, но заблокирован до реализации адаптера выдачи ключей.
+Мастер проверит токен через Telegram API, создаст `.env` и `telemt/config.toml`, затем запустит контейнеры TeleMT и бота.
 
 Проверка установленного проекта:
 
 ```text
-22) 🧪 Проверка установки
+21) 🧪 Проверка установки
 ```
 
 ## Файлы и управление
@@ -120,14 +120,14 @@ mtp
 2) 🚀 Установка / обновление / запуск
 3) ✅ Статус контейнеров
 4) 📄 Логи бота
-5) 📄 Логи proxy
+5) 📄 Логи TeleMT
 6) 📋 Список ключей
 7) ➕ Добавить ключ вручную
 8) 🔄 Обновить ключ клиента по Telegram ID + синхронизировать SQLite
 9) 🔗 Показать ссылку по Telegram ID
 10) 🔗 Показать ссылку по client_id
 11) ❌ Удалить ключ по client_id
-12) ♻️ Применить изменения proxy
+12) ♻️ Проверить TeleMT API / применить изменения
 13) ⚙️ Открыть .env
 14) 💾 Сделать бэкап
 15) 🔁 Пересоздать Telegram-ботов
@@ -136,8 +136,7 @@ mtp
 18) 🖥️ Перезагрузить VPS полностью
 19) 📄 Логи бота поддержки
 20) 🛡 Установить watcher автоматического рестарта
-21) 🧩 Выбор / смена ядра proxy
-22) 🧪 Проверка установки
+21) 🧪 Проверка установки
 0) 🚪 Выход
 ```
 
@@ -244,10 +243,10 @@ docker compose up -d --build --force-recreate bot support_bot mtproto
 docker compose exec bot python proxy_manager.py rotate-telegram 123456789
 ```
 
-Применить изменения proxy без полного рестарта:
+Проверить TeleMT API после изменения ключей:
 
 ```bash
-docker compose kill -s SIGUSR2 mtproto
+docker compose exec bot python -c "import urllib.request,json; print(json.loads(urllib.request.urlopen('http://mtproto:9091/v1/users',timeout=3).read()))"
 ```
 
 ## Важные файлы
@@ -258,6 +257,7 @@ docker compose kill -s SIGUSR2 mtproto
 - `bot/keyboards.py` — кнопки и клавиатуры.
 - `bot/tariffs.py` — тарифы и статусы включён/в разработке.
 - `bot/proxy_manager.py` — создание, удаление, обновление ключей.
+- `telemt/config.toml` — runtime-конфигурация TeleMT, создаётся мастером установки.
 - `manage.sh` — меню управления на VPS.
 - `.env.example` — безопасный пример настроек без реальных секретов.
 

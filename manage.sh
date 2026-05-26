@@ -246,31 +246,6 @@ read_tls_domain() {
   done
 }
 
-read_proxy_core() {
-  local choice
-  while true; do
-    echo "Выберите ядро MTProto proxy:"
-    echo
-    echo "1) alexbers/mtprotoproxy — текущий стабильный вариант, уже поддерживается магазином"
-    echo "2) telemt — новое ядро, использовать только если реализована поддержка TeleMT в proxy_manager.py"
-    echo
-    read -r -p "Ваш выбор [1]: " choice
-    choice="${choice:-1}"
-    case "$choice" in
-      1)
-        WIZARD_PROXY_CORE="alexbers"
-        return 0
-        ;;
-      2)
-        echo -e "${YELLOW}TeleMT adapter ещё не реализован, выберите alexbers для рабочей установки.${NC}"
-        ;;
-      *)
-        echo -e "${RED}Выберите 1 или 2.${NC}"
-        ;;
-    esac
-  done
-}
-
 read_support_settings() {
   while true; do
     echo "Введите контакт поддержки, например @username или ссылку [можно оставить пустым]:"
@@ -347,50 +322,37 @@ SERVER_HOST=${WIZARD_SERVER_HOST}
 PROXY_PORT=${WIZARD_PROXY_PORT}
 TLS_DOMAIN=${WIZARD_TLS_DOMAIN}
 
-PROXY_CORE=${WIZARD_PROXY_CORE}
+PROXY_CORE=telemt
+TELEMT_API_URL=http://mtproto:9091
+TELEMT_SYSTEM_USER=shop_bootstrap
 
 SUPPORT_CONTACT=${WIZARD_SUPPORT_CONTACT}
 DATABASE_PATH=/app/data/shop.db
 
 PAYMENT_MODE=${WIZARD_PAYMENT_MODE}
 DEV_AUTO_ISSUE=${WIZARD_DEV_AUTO_ISSUE}
-
-TELEMT_API_URL=http://mtproto:9091
-TELEMT_CONFIG_PATH=/app/telemt/config.toml
 EOF
   chmod 600 .env
 }
 
-ensure_alexbers_runtime_config() {
-  mkdir -p proxy/config data backups logs
-  if [[ ! -f proxy/config/config.py ]]; then
-    if [[ ! -f proxy/config/config.example.py ]]; then
-      echo -e "${RED}Не найден шаблон proxy/config/config.example.py.${NC}"
-      return 1
-    fi
-    cp proxy/config/config.example.py proxy/config/config.py
-    echo "Создан runtime config: proxy/config/config.py"
+write_telemt_config() {
+  mkdir -p telemt data backups logs
+  if [[ ! -f telemt/config.example.toml ]]; then
+    echo -e "${RED}Не найден шаблон telemt/config.example.toml.${NC}"
+    return 1
   fi
-  # alexbers image reads this bind mount; keep the existing compatible read mode.
-  chmod 644 proxy/config/config.py
-}
-
-prepare_compose_for_core() {
-  local core="$1"
-  case "$core" in
-    alexbers)
-      cp deploy/docker-compose.alexbers.yml docker-compose.yml
-      ensure_alexbers_runtime_config
-      ;;
-    telemt)
-      echo -e "${RED}TeleMT adapter ещё не реализован, переключение заблокировано.${NC}"
-      return 1
-      ;;
-    *)
-      echo -e "${RED}Неизвестное ядро proxy: ${core}.${NC}"
-      return 1
-      ;;
-  esac
+  local secret
+  secret="$(openssl rand -hex 16)"
+  sed \
+    -e "s|__SERVER_HOST__|${WIZARD_SERVER_HOST}|g" \
+    -e "s|__PROXY_PORT__|${WIZARD_PROXY_PORT}|g" \
+    -e "s|__TLS_DOMAIN__|${WIZARD_TLS_DOMAIN}|g" \
+    -e "s|__SHOP_BOOTSTRAP_SECRET__|${secret}|g" \
+    telemt/config.example.toml > telemt/config.toml
+  chown 65532:65532 telemt telemt/config.toml
+  chmod 700 telemt
+  chmod 600 telemt/config.toml
+  echo "Создан runtime config TeleMT: telemt/config.toml"
 }
 
 container_is_running() {
@@ -407,15 +369,31 @@ open_custom_proxy_port() {
 }
 
 start_and_verify_installation() {
+  local attempt
   echo -e "${BLUE}Собираю и запускаю контейнеры...${NC}"
   $COMPOSE_CMD up -d --build --force-recreate
   $COMPOSE_CMD ps
-  sleep 8
 
   if ! container_is_running "mtproto-shop-proxy"; then
     echo -e "${RED}Контейнер mtproto-shop-proxy не запущен. Установка не завершена.${NC}"
     return 1
   fi
+
+  echo -e "${BLUE}Ожидаю готовности TeleMT API...${NC}"
+  for attempt in {1..30}; do
+    if $COMPOSE_CMD exec -T bot python -c \
+      "import urllib.request; urllib.request.urlopen('http://mtproto:9091/v1/users', timeout=2).read()" \
+      >/dev/null 2>&1; then
+      echo -e "${GREEN}✅ TeleMT API доступен из контейнера бота.${NC}"
+      break
+    fi
+    if [[ "$attempt" -eq 30 ]]; then
+      echo -e "${RED}TeleMT API не ответил за 60 секунд. Последние строки логов:${NC}"
+      $COMPOSE_CMD logs --tail=80 mtproto || true
+      return 1
+    fi
+    sleep 2
+  done
 
   if ! container_is_running "mtproto-shop-bot"; then
     echo -e "${RED}Основной Telegram-бот не запущен. Последние строки логов:${NC}"
@@ -444,18 +422,17 @@ first_setup_wizard() {
   read_server_host
   read_proxy_port
   read_tls_domain
-  read_proxy_core
   read_support_settings
   read_payment_settings
 
   write_wizard_env
-  prepare_compose_for_core "$WIZARD_PROXY_CORE" || return 1
+  write_telemt_config || return 1
   open_custom_proxy_port "$WIZARD_PROXY_PORT"
   start_and_verify_installation || return 1
 
   if ! check_telegram_token "$WIZARD_BOT_TOKEN"; then
     echo -e "${RED}После запуска не удалось повторно проверить BOT_TOKEN через Telegram API.${NC}"
-    echo "Контейнер запущен, но установка требует проверки сети и токена через пункт 22."
+    echo "Контейнер запущен, но установка требует проверки сети и токена через пункт 21."
     return 1
   fi
   WIZARD_BOT_USERNAME="$TELEGRAM_BOT_USERNAME"
@@ -472,7 +449,7 @@ first_setup_wizard() {
   echo "mtp"
   echo
   echo "Ядро proxy:"
-  echo "${WIZARD_PROXY_CORE}"
+  echo "telemt"
   echo
   echo "Сервер:"
   echo "${WIZARD_SERVER_HOST}:${WIZARD_PROXY_PORT}"
@@ -495,7 +472,7 @@ first_setup_wizard() {
   echo
   echo "Если бот не отвечает:"
   echo "mtp"
-  echo "→ 22) 🧪 Проверка установки"
+  echo "→ 21) 🧪 Проверка установки"
   echo "→ 4) 📄 Логи бота"
   echo
   echo "=================================================="
@@ -509,14 +486,16 @@ run_bot_cmd() {
   fi
 }
 
-reload_proxy() {
+check_telemt_api() {
   echo
-  echo -e "${BLUE}Применяю изменения proxy...${NC}"
-  if $COMPOSE_CMD kill -s SIGUSR2 mtproto >/dev/null 2>&1; then
-    echo -e "${GREEN}Готово: mtproto перечитал config через SIGUSR2.${NC}"
+  echo -e "${BLUE}Проверяю TeleMT API из контейнера бота...${NC}"
+  if $COMPOSE_CMD exec -T bot python -c \
+    "import urllib.request; urllib.request.urlopen('http://mtproto:9091/v1/users', timeout=3).read()" \
+    >/dev/null 2>&1; then
+    echo -e "${GREEN}✅ TeleMT API доступен; изменения ключей применяются через API.${NC}"
   else
-    echo -e "${YELLOW}SIGUSR2 не сработал, делаю restart mtproto...${NC}"
-    $COMPOSE_CMD restart mtproto
+    echo -e "${RED}TeleMT API недоступен из контейнера бота.${NC}"
+    return 1
   fi
 }
 
@@ -629,14 +608,14 @@ add_key() {
   read -r -p "Введите client_id: " client_id
   [[ -n "$client_id" ]] || { echo "client_id пустой"; return 1; }
   run_bot_cmd create "$client_id"
-  reload_proxy
+  check_telemt_api
 }
 
 rotate_key_by_telegram_id() {
   read -r -p "Введите telegram_id клиента: " telegram_id
   [[ "$telegram_id" =~ ^[0-9]+$ ]] || { echo "telegram_id должен быть числом"; return 1; }
   run_bot_cmd rotate-telegram "$telegram_id"
-  reload_proxy
+  check_telemt_api
 }
 
 show_link_by_telegram_id() {
@@ -657,7 +636,7 @@ delete_key() {
   read -r -p "Точно удалить ключ ${client_id}? Напишите YES: " answer
   [[ "$answer" == "YES" ]] || { echo "Отменено"; return 0; }
   run_bot_cmd delete "$client_id"
-  reload_proxy
+  check_telemt_api
 }
 
 edit_env() {
@@ -667,75 +646,13 @@ edit_env() {
 backup_now() {
   mkdir -p backups
   archive="backups/mtproto-shop-backup-$(date +%Y%m%d-%H%M%S).tar.gz"
-  extra=()
-  [[ -d telemt ]] && extra+=(telemt)
-  tar -czf "$archive" data proxy/config .env docker-compose.yml "${extra[@]}" 2>/dev/null || true
+  tar -czf "$archive" data telemt .env docker-compose.yml 2>/dev/null || true
   echo "Бэкап создан: $archive"
-}
-
-update_env_key() {
-  local key="$1" value="$2" tmp
-  tmp="$(mktemp)"
-  if grep -q "^${key}=" .env 2>/dev/null; then
-    sed "s/^${key}=.*/${key}=${value}/" .env > "$tmp"
-  else
-    cat .env > "$tmp"
-    printf '\n%s=%s\n' "$key" "$value" >> "$tmp"
-  fi
-  chmod 600 "$tmp"
-  mv "$tmp" .env
-}
-
-switch_proxy_core() {
-  local current choice stamp backup_dir
-  need_env || return 1
-  current="$(get_env_value PROXY_CORE)"
-  current="${current:-alexbers}"
-  echo "Текущее ядро proxy: ${current}"
-  echo
-  echo "1) alexbers"
-  echo "2) telemt"
-  echo
-  read -r -p "Выберите ядро [1]: " choice
-  choice="${choice:-1}"
-
-  if [[ "$choice" == "2" ]]; then
-    echo -e "${YELLOW}TeleMT adapter ещё не реализован, выберите alexbers для рабочей установки.${NC}"
-    echo "Смена ядра отменена: существующие ключи и данные не изменены."
-    return 0
-  fi
-  if [[ "$choice" != "1" ]]; then
-    echo -e "${RED}Неверный выбор.${NC}"
-    return 1
-  fi
-  if [[ "$current" == "alexbers" ]]; then
-    echo "Уже используется alexbers. Изменения не требуются."
-    return 0
-  fi
-
-  echo -e "${YELLOW}Внимание: смена ядра может быть несовместима с ранее выданными ключами.${NC}"
-  read -r -p "Вернуться на поддерживаемое ядро alexbers? Напишите YES: " choice
-  [[ "$choice" == "YES" ]] || { echo "Отменено."; return 0; }
-
-  stamp="$(date +%Y%m%d-%H%M%S)"
-  backup_dir="backups/proxy-core-${stamp}"
-  mkdir -p "$backup_dir"
-  cp -p .env "$backup_dir/.env"
-  [[ -f docker-compose.yml ]] && cp -p docker-compose.yml "$backup_dir/docker-compose.yml"
-  [[ -f proxy/config/config.py ]] && cp -p proxy/config/config.py "$backup_dir/config.py"
-  [[ -f telemt/config.toml ]] && cp -p telemt/config.toml "$backup_dir/config.toml"
-  chmod -R go-rwx "$backup_dir"
-
-  update_env_key PROXY_CORE alexbers
-  prepare_compose_for_core alexbers || return 1
-  ensure_docker_installed || return 1
-  $COMPOSE_CMD up -d --build --force-recreate
-  $COMPOSE_CMD ps
-  echo -e "${GREEN}Ядро proxy переключено на alexbers. Бэкап сохранён: ${backup_dir}${NC}"
 }
 
 check_installation() {
   local token admin_id server_host proxy_port tls_domain proxy_core support_token
+  local telemt_api_url telemt_system_user
   local -a errors=()
 
   if ! command -v docker >/dev/null 2>&1; then
@@ -758,6 +675,8 @@ check_installation() {
     tls_domain="$(get_env_value TLS_DOMAIN)"
     proxy_core="$(get_env_value PROXY_CORE)"
     support_token="$(get_env_value SUPPORT_BOT_TOKEN)"
+    telemt_api_url="$(get_env_value TELEMT_API_URL)"
+    telemt_system_user="$(get_env_value TELEMT_SYSTEM_USER)"
 
     [[ -n "$token" ]] || errors+=("BOT_TOKEN не заполнен.")
     if [[ -n "$token" ]] && ! check_telegram_token "$token"; then
@@ -767,12 +686,15 @@ check_installation() {
     [[ -n "$server_host" ]] || errors+=("SERVER_HOST не заполнен.")
     [[ "$proxy_port" =~ ^[0-9]+$ ]] || errors+=("PROXY_PORT отсутствует или указан неверно.")
     [[ -n "$tls_domain" ]] || errors+=("TLS_DOMAIN не заполнен.")
-    [[ -n "$proxy_core" ]] || errors+=("PROXY_CORE не заполнен.")
-    [[ -z "$proxy_core" || "$proxy_core" == "alexbers" ]] \
-      || errors+=("PROXY_CORE=${proxy_core} пока не поддерживается; выберите alexbers.")
+    [[ "$proxy_core" == "telemt" ]] || errors+=("PROXY_CORE должен быть telemt.")
+    [[ "$telemt_api_url" == "http://mtproto:9091" ]] \
+      || errors+=("TELEMT_API_URL должен быть http://mtproto:9091.")
+    [[ "$telemt_system_user" == "shop_bootstrap" ]] \
+      || errors+=("TELEMT_SYSTEM_USER должен быть shop_bootstrap.")
   fi
 
   [[ -f docker-compose.yml ]] || errors+=("Файл docker-compose.yml не найден.")
+  [[ -f telemt/config.toml ]] || errors+=("Файл telemt/config.toml не найден. Запустите пункт 1.")
   if [[ -f docker-compose.yml ]] && docker compose version >/dev/null 2>&1 \
     && ! docker compose config >/dev/null 2>&1; then
     errors+=("docker compose config завершился с ошибкой.")
@@ -789,6 +711,11 @@ check_installation() {
     fi
     if [[ -n "${support_token:-}" ]] && ! container_is_running "mtproto-shop-support-bot"; then
       errors+=("SUPPORT_BOT_TOKEN задан, но контейнер mtproto-shop-support-bot не запущен.")
+    fi
+    if container_is_running "mtproto-shop-bot" && ! $COMPOSE_CMD exec -T bot python -c \
+      "import urllib.request; urllib.request.urlopen('http://mtproto:9091/v1/users', timeout=3).read()" \
+      >/dev/null 2>&1; then
+      errors+=("TeleMT API недоступен из контейнера mtproto-shop-bot.")
     fi
   fi
   if [[ "${proxy_port:-}" =~ ^[0-9]+$ ]] && ! is_port_listening "$proxy_port"; then
@@ -824,14 +751,14 @@ while true; do
   echo "2) 🚀 Установка / обновление / запуск"
   echo "3) ✅ Статус контейнеров"
   echo "4) 📄 Логи бота"
-  echo "5) 📄 Логи proxy"
+  echo "5) 📄 Логи TeleMT"
   echo "6) 📋 Список ключей"
   echo "7) ➕ Добавить ключ вручную"
   echo "8) 🔄 Обновить ключ клиента по Telegram ID + синхронизировать SQLite"
   echo "9) 🔗 Показать ссылку по Telegram ID"
   echo "10) 🔗 Показать ссылку по client_id"
   echo "11) ❌ Удалить ключ по client_id"
-  echo "12) ♻️ Применить изменения proxy"
+  echo "12) ♻️ Проверить TeleMT API / применить изменения"
   echo "13) ⚙️ Открыть .env"
   echo "14) 💾 Сделать бэкап"
   echo "15) 🔁 Пересоздать Telegram-ботов"
@@ -840,8 +767,7 @@ while true; do
   echo "18) 🖥️ Перезагрузить VPS полностью"
   echo "19) 📄 Логи бота поддержки"
   echo "20) 🛡 Установить watcher автоматического рестарта"
-  echo "21) 🧩 Выбор / смена ядра proxy"
-  echo "22) 🧪 Проверка установки"
+  echo "21) 🧪 Проверка установки"
   echo "0) 🚪 Выход"
   echo
   read -r -p "Выберите действие: " choice
@@ -858,7 +784,7 @@ while true; do
     9) show_link_by_telegram_id || true; pause ;;
     10) show_link_by_client_id || true; pause ;;
     11) delete_key || true; pause ;;
-    12) reload_proxy || true; pause ;;
+    12) check_telemt_api || true; pause ;;
     13) edit_env || true; pause ;;
     14) backup_now || true; pause ;;
     15) restart_bot || true; pause ;;
@@ -867,8 +793,7 @@ while true; do
     18) reboot_vps ;;
     19) show_support_bot_logs || true ;;
     20) install_restart_watcher || true; pause ;;
-    21) switch_proxy_core || true; pause ;;
-    22) check_installation || true; pause ;;
+    21) check_installation || true; pause ;;
     0) exit 0 ;;
     *) echo "Неверный пункт"; pause ;;
   esac

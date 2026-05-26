@@ -48,7 +48,9 @@ class Settings:
     server_host: str
     proxy_port: int
     tls_domain: str
-    proxy_config_path: Path
+    proxy_core: str
+    telemt_api_url: str
+    telemt_system_user: str
     database_path: Path
     support_contact: str
     PAYMENT_MODE: Literal["manual", "stars", "crypto", "auto_free"]
@@ -72,9 +74,9 @@ def get_settings() -> Settings:
         server_host=os.getenv("SERVER_HOST", "SERVER_HOST"),
         proxy_port=int(os.getenv("PROXY_PORT", "443")),
         tls_domain=os.getenv("TLS_DOMAIN", "www.cloudflare.com").strip(),
-        proxy_config_path=Path(
-            os.getenv("PROXY_CONFIG_PATH", "proxy/config/config.py")
-        ),
+        proxy_core=os.getenv("PROXY_CORE", "telemt").strip().lower() or "telemt",
+        telemt_api_url=os.getenv("TELEMT_API_URL", "http://mtproto:9091").strip().rstrip("/"),
+        telemt_system_user=os.getenv("TELEMT_SYSTEM_USER", "shop_bootstrap").strip() or "shop_bootstrap",
         database_path=Path(os.getenv("DATABASE_PATH", "data/shop.db")),
         support_contact=sanitize_support_contact(
             os.getenv("SUPPORT_CONTACT", ""),
