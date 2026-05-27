@@ -1,6 +1,5 @@
 from datetime import UTC, timedelta
 from html import escape
-import logging
 
 from aiogram import F, Router
 from aiogram.filters import CommandStart, StateFilter
@@ -46,6 +45,7 @@ from keyboards import (
     SUPPORT_BUTTON,
     TRY_FREE_BUTTON,
     admin_pay_request_keyboard,
+    alt_links_keyboard,
     client_menu,
     client_tariff_keyboard,
     connect_keyboard,
@@ -56,11 +56,23 @@ from keyboards import (
     support_keyboard,
     try_or_buy_keyboard,
 )
-from proxy_manager import build_tls_proxy_link, create_secret, list_clients, rotate_secret
+from logging_setup import get_logger
+from proxy_manager import (
+    CircuitOpenError,
+    RotateCooldownError,
+    TeleMTError,
+    build_alternative_links,
+    build_tls_proxy_link,
+    create_secret,
+    rotate_secret,
+)
+from rate_limit import check_action_rate, format_retry_after
 from tariffs import Tariff, get_tariff
+from tls_domains import get_picker
 
 
 router = Router()
+logger = get_logger(__name__)
 
 
 class ClientSupportStates(StatesGroup):
@@ -70,50 +82,97 @@ class ClientSupportStates(StatesGroup):
 PROXY_CLEANUP_NOTICE = (
     "⚠️ Перед подключением нового ключа удалите старые нерабочие прокси в Telegram.\n\n"
     "Где удалить:\n\n"
-    "iPhone:\n"
-    "Telegram → Настройки → Прокси\n\n"
-    "Если пункта «Прокси» нет:\n"
-    "Настройки → Данные и память → Прокси\n\n"
-    "Android:\n"
+    "iPhone (iOS 17 и ниже):\n"
     "Telegram → Настройки → Данные и память → Прокси\n\n"
-    "Компьютер:\n"
-    "Telegram → Настройки → Продвинутые настройки → Тип соединения / Прокси\n\n"
+    "iPhone (iOS 18+):\n"
+    "Настройки iPhone → Apps → Telegram → Прокси\n"
+    "ИЛИ Telegram → Настройки → Данные и память → Прокси\n\n"
+    "Android / Huawei:\n"
+    "Telegram → Настройки → Данные и память → Прокси\n\n"
+    "Windows / macOS:\n"
+    "Telegram → Настройки → Продвинутые настройки → Тип соединения → Прокси\n\n"
     "После удаления старых прокси нажмите на новый ключ и выберите «Подключить прокси»."
 )
 
 
 HELP_CHECKLIST_TEXT = (
     "<b>🆘 Не подключается?</b>\n\n"
-    "Проверьте 5 пунктов:\n"
+    "Проверьте 6 пунктов:\n"
     "1. Обновите Telegram до последней версии.\n"
     "2. Отключите другой VPN или proxy.\n"
     "3. Попробуйте другую сеть: Wi-Fi или мобильный интернет.\n"
-    "4. В разделе «📅 Моя подписка» нажмите «🔄 Обновить ключ».\n"
-    "5. Если не помогло — напишите в поддержку."
+    "4. Нажмите «🌐 Альтернативные ссылки» и попробуйте другой вариант.\n"
+    "5. В разделе «📅 Моя подписка» нажмите «🔄 Обновить ключ».\n"
+    "6. Если не помогло — напишите в поддержку."
 )
 INSTRUCTION_TEXTS = {
     "client_instr_iphone": (
-        "<b>📱 iPhone</b>\n\n"
-        "1. Нажмите «🔐 Подключиться» в этом боте.\n"
-        "2. Telegram откроется и спросит «Включить прокси?» — нажмите ВКЛЮЧИТЬ.\n"
-        "3. Готово. В правом верхнем углу появится значок щита 🛡.\n\n"
-        "Если кнопка не сработала — раздел «🆘 Помощь»."
+        "<b>📱 iPhone (iOS 17 и ниже)</b>\n\n"
+        "1. Обновите Telegram до последней версии в App Store.\n"
+        "2. Нажмите «🔐 Подключиться» в этом боте.\n"
+        "3. Telegram спросит «Включить прокси?» — нажмите ВКЛЮЧИТЬ.\n"
+        "4. Готово. В правом верхнем углу появится значок щита 🛡.\n\n"
+        "Если ссылка не открывается — нажмите «🌐 Альтернативные ссылки» "
+        "и попробуйте другой домен TLS-маскировки."
+    ),
+    "client_instr_iphone18": (
+        "<b>📱 iPhone (iOS 18 и новее)</b>\n\n"
+        "В iOS 18 раздел Прокси переехал. Если вы не видите кнопку «Прокси» "
+        "в Telegram:\n\n"
+        "1. Настройки iPhone → Apps → Telegram → Прокси.\n"
+        "2. ИЛИ откройте Telegram → Настройки → Данные и память → Прокси.\n\n"
+        "Дальше как обычно:\n"
+        "3. Нажмите «🔐 Подключиться» в этом боте.\n"
+        "4. Telegram спросит «Включить прокси?» — нажмите ВКЛЮЧИТЬ.\n"
+        "5. В правом верхнем углу появится значок щита 🛡."
     ),
     "client_instr_android": (
-        "<b>🤖 Android</b>\n\n"
-        "1. Нажмите «🔐 Подключиться» в этом боте.\n"
-        "2. Telegram покажет настройки proxy — нажмите ВКЛЮЧИТЬ.\n"
-        "3. Готово. В верхней части Telegram появится значок щита 🛡.\n\n"
-        "Если кнопка не сработала — раздел «🆘 Помощь»."
+        "<b>🤖 Android / Huawei (без GMS)</b>\n\n"
+        "1. Обновите Telegram из доступного вам магазина или с telegram.org.\n"
+        "2. Нажмите «🔐 Подключиться» в этом боте.\n"
+        "3. Telegram покажет настройки proxy — нажмите ВКЛЮЧИТЬ.\n"
+        "4. Готово. В верхней части Telegram появится значок щита 🛡.\n\n"
+        "Google Play Services для MTProto не требуются — подключение работает "
+        "на любом Android и на Huawei без GMS.\n\n"
+        "На Android 14+: если соединение рвётся в фоне, отключите оптимизацию "
+        "батареи для Telegram (Настройки → Приложения → Telegram → Батарея → Без ограничений)."
     ),
     "client_instr_desktop": (
-        "<b>💻 Windows / macOS</b>\n\n"
-        "1. Нажмите «🔐 Подключиться» в этом боте.\n"
-        "2. Telegram Desktop откроет окно proxy — подтвердите подключение.\n"
-        "3. Готово. В приложении появится значок щита 🛡.\n\n"
-        "Если кнопка не сработала — раздел «🆘 Помощь»."
+        "<b>💻 Windows / macOS / Linux</b>\n\n"
+        "1. Обновите Telegram Desktop до последней версии.\n"
+        "2. Нажмите «🔐 Подключиться» в этом боте.\n"
+        "3. Telegram Desktop откроет окно proxy — подтвердите подключение.\n"
+        "4. Готово. В приложении появится значок щита 🛡.\n\n"
+        "Если кнопка не открывает Telegram автоматически — скопируйте ссылку "
+        "из меню «🌐 Альтернативные ссылки» и вставьте в браузер."
+    ),
+    "client_instr_x": (
+        "<b>📱 Telegram X</b>\n\n"
+        "Нажмите «🔐 Подключиться» и подтвердите proxy, если приложение покажет "
+        "такой диалог.\n\n"
+        "Telegram X в 2026 году поддерживается ограниченно. Если соединение "
+        "нестабильно — используйте официальный Telegram (он также бесплатный "
+        "и обновляется чаще)."
+    ),
+    "client_instr_web": (
+        "<b>🌐 Telegram Web</b>\n\n"
+        "⚠️ Веб-версия Telegram <b>не поддерживает MTProto proxy</b>.\n\n"
+        "Откройте эту же кнопку «🔐 Подключиться» в установленном Telegram:\n"
+        "• iPhone — из App Store\n"
+        "• Android — Google Play / RuStore / telegram.org\n"
+        "• Windows / macOS / Linux — Telegram Desktop с telegram.org\n\n"
+        "Для веб-версии MTProto proxy в принципе не нужен — она использует "
+        "обычные HTTPS-соединения и блокируется/не блокируется по другим правилам."
     ),
 }
+SALES_DISABLED_TEXT = (
+    "Продажа временно недоступна. Если у вас уже есть активный доступ — "
+    "используйте кнопку 🔑 Мои ключи."
+)
+PROXY_TEMPORARILY_UNAVAILABLE_TEXT = (
+    "Сервис подключения временно недоступен. Попробуйте ещё раз через 1–2 минуты "
+    "или обратитесь в поддержку."
+)
 
 
 def format_datetime(value: str) -> str:
@@ -131,11 +190,24 @@ def client_id_for(telegram_id: int) -> str:
     return f"tg_{telegram_id}"
 
 
-def ensure_secret(client_id: str, preferred_secret: str | None = None) -> str:
-    users = list_clients()
-    if client_id in users:
-        return users[client_id]
-    return create_secret(client_id, preferred_secret)
+def primary_tls_domain() -> str:
+    """Best-known TLS domain at this moment, falling back to settings if no probe yet."""
+    settings = get_settings()
+    picker = get_picker()
+    try:
+        return picker.pick_best() or settings.tls_domain
+    except Exception:
+        return settings.tls_domain
+
+
+def build_primary_link(secret: str) -> str:
+    settings = get_settings()
+    return build_tls_proxy_link(
+        settings.server_host,
+        settings.proxy_port,
+        secret,
+        primary_tls_domain(),
+    )
 
 
 def support_url(contact: str) -> str:
@@ -159,7 +231,20 @@ async def issue_access(telegram_id: int, tariff: Tariff) -> dict:
         telegram_id,
     )
     previous_secret = latest["secret"] if latest and latest["secret"] else None
-    secret = ensure_secret(client_id_for(telegram_id), previous_secret)
+    client_id = client_id_for(telegram_id)
+    try:
+        secret = await create_secret(client_id, previous_secret)
+    except (CircuitOpenError, TeleMTError) as exc:
+        if previous_secret:
+            logger.warning(
+                "event=issue_access_degraded_using_previous_secret",
+                telegram_id=telegram_id,
+                error=str(exc),
+            )
+            secret = previous_secret
+        else:
+            raise
+
     now = utc_now()
 
     if latest and latest["status"] == ACTIVE_STATUS:
@@ -192,13 +277,7 @@ async def issue_access(telegram_id: int, tariff: Tariff) -> dict:
 
 
 async def send_granted_access(message: Message, tariff: Tariff, subscription: dict) -> None:
-    settings = get_settings()
-    link = build_tls_proxy_link(
-        settings.server_host,
-        settings.proxy_port,
-        subscription["secret"],
-        settings.tls_domain,
-    )
+    link = build_primary_link(subscription["secret"])
     await message.answer(
         "<b>🎉 Доступ активирован!</b>\n\n"
         f"📦 Тариф: {escape(tariff.title)}\n"
@@ -208,7 +287,7 @@ async def send_granted_access(message: Message, tariff: Tariff, subscription: di
     )
 
 
-async def grant_free_trial(message: Message, user: User) -> bool:
+async def grant_free_trial(message: Message, user: User) -> bool | None:
     settings = get_settings()
     await upsert_user(
         settings.database_path,
@@ -225,7 +304,18 @@ async def grant_free_trial(message: Message, user: User) -> bool:
         return False
 
     tariff = get_tariff(1)
-    subscription = await issue_access(user.id, tariff)
+    try:
+        subscription = await issue_access(user.id, tariff)
+    except Exception:
+        logger.exception(
+            "event=client_issue_access_failed",
+            telegram_id=user.id,
+        )
+        await message.answer(
+            PROXY_TEMPORARILY_UNAVAILABLE_TEXT,
+            reply_markup=client_menu(),
+        )
+        return None
     await mark_trial_used(settings.database_path, user.id)
     await send_granted_access(message, tariff, subscription)
     return True
@@ -281,9 +371,9 @@ async def send_support_request(
                 "Клиент нажал кнопку поддержки.",
             )
         except Exception:
-            logging.exception(
-                "Failed to notify admin about support request from telegram_id=%s",
-                user.id,
+            logger.exception(
+                "event=support_admin_notify_failed",
+                telegram_id=user.id,
             )
             await message.answer(
                 "Поддержка временно недоступна, попробуйте позже",
@@ -400,6 +490,9 @@ async def try_free_inline(callback: CallbackQuery) -> None:
         return
 
     granted = await grant_free_trial(message, user)
+    if granted is None:
+        await callback.answer("Сервис временно недоступен.", show_alert=True)
+        return
     await callback.answer(
         "Доступ выдан" if granted else "Пробный день уже использован.",
         show_alert=not granted,
@@ -453,11 +546,7 @@ async def instruction_inline(callback: CallbackQuery) -> None:
     await message.answer("Выберите устройство:", reply_markup=instructions_menu())
 
 
-@router.callback_query(
-    (F.data == "client_instr_iphone")
-    | (F.data == "client_instr_android")
-    | (F.data == "client_instr_desktop")
-)
+@router.callback_query(F.data.in_(set(INSTRUCTION_TEXTS.keys())))
 async def instruction_device(callback: CallbackQuery) -> None:
     message = callback.message
     if message is None or not hasattr(message, "answer"):
@@ -517,6 +606,21 @@ async def pay_request(callback: CallbackQuery) -> None:
 
     if tariff is None or tariff.price == 0:
         await callback.answer("Тариф не найден.", show_alert=True)
+        return
+
+    if not settings.payments_enabled:
+        await callback.answer("Продажа временно недоступна.", show_alert=True)
+        await message.answer(SALES_DISABLED_TEXT, reply_markup=client_menu())
+        return
+
+    allowed, retry_after = check_action_rate(
+        user.id, "pay_request", limit=5, window_seconds=3600
+    )
+    if not allowed:
+        await callback.answer(
+            f"Слишком много заявок. Подождите {format_retry_after(retry_after)}.",
+            show_alert=True,
+        )
         return
 
     if settings.admin_id is None:
@@ -583,6 +687,11 @@ async def choose_client_tariff(callback: CallbackQuery) -> None:
     )
 
     is_free_trial = tariff.days == 1 and tariff.price == 0
+    if not is_free_trial and not settings.payments_enabled:
+        await callback.answer("Продажа временно недоступна.", show_alert=True)
+        await message.answer(SALES_DISABLED_TEXT, reply_markup=client_menu())
+        return
+
     auto_free_enabled = (
         settings.PAYMENT_MODE == "auto_free" and settings.test_auto_issue_access
     )
@@ -615,7 +724,19 @@ async def choose_client_tariff(callback: CallbackQuery) -> None:
         )
         return
 
-    subscription = await issue_access(user.id, tariff)
+    try:
+        subscription = await issue_access(user.id, tariff)
+    except Exception:
+        logger.exception(
+            "event=client_issue_access_failed",
+            telegram_id=user.id,
+        )
+        await callback.answer("Сервис временно недоступен.", show_alert=True)
+        await message.answer(
+            PROXY_TEMPORARILY_UNAVAILABLE_TEXT,
+            reply_markup=client_menu(),
+        )
+        return
     if is_free_trial:
         await mark_trial_used(settings.database_path, user.id)
 
@@ -638,12 +759,7 @@ async def send_my_link(message: Message, telegram_id: int) -> None:
         )
         return
 
-    link = build_tls_proxy_link(
-        settings.server_host,
-        settings.proxy_port,
-        subscription["secret"],
-        settings.tls_domain,
-    )
+    link = build_primary_link(subscription["secret"])
 
     await message.answer(
         "<b>🔑 Мои ключи</b>\n\n"
@@ -734,6 +850,53 @@ async def show_days_left(message: Message, state: FSMContext) -> None:
     )
 
 
+@router.callback_query(F.data == "client_alt_links")
+async def send_alt_links(callback: CallbackQuery) -> None:
+    message = callback.message
+    user = callback.from_user
+    if message is None or not hasattr(message, "answer"):
+        await callback.answer("Откройте меню командой /start.", show_alert=True)
+        return
+
+    settings = get_settings()
+    subscription = await get_active_subscription_by_telegram_id(
+        settings.database_path,
+        user.id,
+    )
+    if subscription is None or not subscription.get("secret"):
+        await callback.answer("Сначала оформите доступ.", show_alert=True)
+        return
+
+    picker = get_picker()
+    ordered = picker.pick_alternatives(n=3) or settings.fallback_tls_domains[:3]
+    secret = subscription["secret"]
+    links = [
+        (d, build_tls_proxy_link(settings.server_host, settings.proxy_port, secret, d))
+        for d in ordered
+    ]
+    if not links:
+        links = build_alternative_links(secret, max_count=3)
+
+    text_lines = [
+        "<b>🌐 Альтернативные ссылки</b>",
+        "",
+        "Попробуйте варианты по очереди — каждая использует другой домен TLS-маскировки. "
+        "Если один заблокирован вашим оператором, другой обычно работает.",
+        "",
+    ]
+    for idx, (domain, link) in enumerate(links, 1):
+        text_lines.append(f"<b>Вариант {idx}</b> (домен {escape(domain)}):")
+        text_lines.append(f"<code>{escape(link)}</code>")
+        text_lines.append("")
+    text_lines.append("💡 Удерживайте ссылку, чтобы скопировать её вручную.")
+
+    await callback.answer()
+    await message.answer(
+        "\n".join(text_lines).rstrip(),
+        reply_markup=alt_links_keyboard(links),
+    )
+
+
 @router.callback_query(F.data == "client_rotate_key")
 async def rotate_client_key(callback: CallbackQuery) -> None:
     settings = get_settings()
@@ -763,31 +926,55 @@ async def rotate_client_key(callback: CallbackQuery) -> None:
             )
             return
 
-    try:
-        secret = rotate_secret(client_id_for(user.id))
-        subscription = await update_latest_subscription_secret_by_telegram_id(
-            settings.database_path,
-            user.id,
-            secret,
+    allowed, retry_after = check_action_rate(
+        user.id, "rotate_secret", limit=5, window_seconds=86400
+    )
+    if not allowed:
+        await callback.answer(
+            f"Лимит обновлений ключа на сегодня исчерпан. Попробуйте через {format_retry_after(retry_after)}.",
+            show_alert=True,
         )
-        if subscription is None:
-            raise ValueError("Подписка не найдена после обновления ключа.")
-        await mark_secret_rotated(settings.database_path, user.id)
+        return
+
+    try:
+        secret = await rotate_secret(client_id_for(user.id))
+    except RotateCooldownError as exc:
+        await callback.answer(
+            f"Подождите {int(exc.retry_after) + 1} сек перед повторным обновлением.",
+            show_alert=True,
+        )
+        return
+    except CircuitOpenError:
+        await callback.answer(
+            "Сервис временно недоступен, попробуйте через минуту.",
+            show_alert=True,
+        )
+        return
     except Exception:
-        logging.exception("Failed to rotate client secret for telegram_id=%s", user.id)
+        logger.exception(
+            "event=rotate_secret_failed",
+            telegram_id=user.id,
+        )
         await callback.answer("Не удалось обновить ключ.", show_alert=True)
         return
 
-    link = build_tls_proxy_link(
-        settings.server_host,
-        settings.proxy_port,
+    subscription = await update_latest_subscription_secret_by_telegram_id(
+        settings.database_path,
+        user.id,
         secret,
-        settings.tls_domain,
     )
+    if subscription is None:
+        await callback.answer("Подписка не найдена.", show_alert=True)
+        return
+    await mark_secret_rotated(settings.database_path, user.id)
+
+    link = build_primary_link(secret)
     await callback.answer("Ключ обновлён")
     await message.answer(
         "🔄 Ключ обновлён. Старый перестанет работать в течение ~5 секунд.\n\n"
-        f"{PROXY_CLEANUP_NOTICE}",
+        f"{PROXY_CLEANUP_NOTICE}\n\n"
+        "💡 Если новая ссылка тоже не работает — нажмите «🌐 Альтернативные ссылки» "
+        "и попробуйте другой домен TLS-маскировки.",
         reply_markup=connect_keyboard(link),
     )
 
@@ -803,6 +990,16 @@ async def relay_client_to_admin(message: Message, state: FSMContext) -> None:
         if message.text.startswith("/"):
             await state.clear()
             await message.answer("Выберите действие в меню ниже.", reply_markup=client_menu())
+            return
+
+        allowed, retry_after = check_action_rate(
+            user.id, "support_relay", limit=10, window_seconds=3600
+        )
+        if not allowed:
+            await message.answer(
+                "Вы отправили слишком много сообщений подряд. "
+                f"Подождите {format_retry_after(retry_after)} и продолжите диалог."
+            )
             return
 
         username = f"@{escape(user.username)}" if user.username else "без username"
@@ -831,7 +1028,7 @@ async def relay_client_to_admin(message: Message, state: FSMContext) -> None:
             reply_markup=client_menu(),
         )
     except Exception:
-        logging.exception("Failed to relay client support message to admin")
+        logger.exception("event=relay_client_to_admin_failed")
         await state.clear()
         try:
             await message.answer(

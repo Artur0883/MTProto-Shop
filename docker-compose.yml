@@ -29,7 +29,8 @@ services:
       - .env
     environment:
       PROXY_PORT: ${PROXY_PORT:-443}
-      TLS_DOMAIN: ${TLS_DOMAIN:-protovich.ru}
+      TLS_DOMAIN: ${TLS_DOMAIN:-petrovich.ru}
+      TLS_DOMAINS: ${TLS_DOMAINS:-}
     ports:
       - "${PROXY_PORT:-443}:443/tcp"
     expose:

@@ -116,6 +116,60 @@ get_env_value() {
   sed -n "s/^${key}=//p" .env | tail -n 1
 }
 
+set_env_value() {
+  local key="$1" value="$2" count tmp
+  [[ -f .env ]] || { echo -e "${RED}.env не найден.${NC}"; return 1; }
+  case "$key" in
+    PAYMENTS_ENABLED|DEV_AUTO_ISSUE)
+      [[ "$value" =~ ^(true|false)$ ]] \
+        || { echo -e "${RED}Некорректное значение ${key}.${NC}"; return 1; }
+      ;;
+    PAYMENT_MODE)
+      [[ "$value" =~ ^(manual|auto_free|stars|crypto)$ ]] \
+        || { echo -e "${RED}Некорректное значение PAYMENT_MODE.${NC}"; return 1; }
+      ;;
+    TLS_DOMAIN|SERVER_HOST)
+      [[ "$value" =~ ^[A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?$ ]] \
+        || { echo -e "${RED}Некорректное значение ${key}.${NC}"; return 1; }
+      ;;
+    *)
+      echo -e "${RED}Ключ ${key} не разрешён для автоматического изменения.${NC}"
+      return 1
+      ;;
+  esac
+  count="$(grep -cE "^${key}=" .env || true)"
+  if (( count > 1 )); then
+    echo -e "${RED}В .env найдено несколько строк ${key}. Исправьте дубли вручную.${NC}"
+    return 1
+  fi
+  tmp="$(mktemp ".env.tmp.XXXXXX")"
+  if (( count == 1 )); then
+    sed "s|^${key}=.*|${key}=${value}|" .env > "$tmp"
+  else
+    cat .env > "$tmp"
+    printf '%s=%s\n' "$key" "$value" >> "$tmp"
+  fi
+  chmod 600 "$tmp"
+  mv "$tmp" .env
+}
+
+backup_runtime_settings() {
+  local label="$1" timestamp
+  [[ -f .env ]] || { echo -e "${RED}.env не найден.${NC}"; return 1; }
+  [[ -f telemt/config.toml ]] \
+    || { echo -e "${RED}telemt/config.toml не найден. Сначала выполните пункт 1.${NC}"; return 1; }
+  mkdir -p backups
+  timestamp="$(date +%Y%m%d-%H%M%S-%N)"
+  LAST_ENV_BACKUP="backups/.env.${label}.bak-${timestamp}"
+  LAST_TELEMT_BACKUP="backups/telemt-config.toml.${label}.bak-${timestamp}"
+  cp -p .env "$LAST_ENV_BACKUP"
+  cp -p telemt/config.toml "$LAST_TELEMT_BACKUP"
+  chmod 600 "$LAST_ENV_BACKUP"
+  echo -e "${YELLOW}Созданы резервные копии:${NC}"
+  echo "  ${LAST_ENV_BACKUP}"
+  echo "  ${LAST_TELEMT_BACKUP}"
+}
+
 mask_token() {
   local token="$1"
   if [[ ${#token} -le 12 ]]; then
@@ -235,32 +289,40 @@ read_proxy_port() {
 }
 
 read_tls_domain() {
-  local choice
+  local choice answer
   while true; do
     echo "Выберите TLS_DOMAIN для маскировки:"
     echo
-    echo "1) protovich.ru — рекомендовано, как в успешной установке TeleMT"
+    echo "1) petrovich.ru — домен из официального примера TeleMT"
     echo "2) www.cloudflare.com"
-    echo "3) Ввести свой домен"
+    echo "3) Проверить кандидатов TLS_DOMAIN с этой VPS"
+    echo "4) Ввести свой домен"
     echo
     read -r -p "Ваш выбор [1]: " choice
     choice="${choice:-1}"
     case "$choice" in
-      1) WIZARD_TLS_DOMAIN="protovich.ru" ;;
+      1) WIZARD_TLS_DOMAIN="petrovich.ru" ;;
       2) WIZARD_TLS_DOMAIN="www.cloudflare.com" ;;
       3)
+        check_tls_candidates
+        continue
+        ;;
+      4)
         echo "Введите свой TLS_DOMAIN для маскировки:"
         read -r -p "> " WIZARD_TLS_DOMAIN
         ;;
       *)
-        echo -e "${RED}Выберите пункт от 1 до 3.${NC}"
+        echo -e "${RED}Выберите пункт от 1 до 4.${NC}"
         continue
         ;;
     esac
-    if [[ "$WIZARD_TLS_DOMAIN" =~ ^[A-Za-z0-9.-]+$ ]]; then
+    [[ "$WIZARD_TLS_DOMAIN" =~ ^[A-Za-z0-9.-]+$ ]] \
+      || { echo -e "${RED}TLS_DOMAIN должен быть доменным именем без пробелов.${NC}"; continue; }
+    if check_tls_domain "$WIZARD_TLS_DOMAIN"; then
       return 0
     fi
-    echo -e "${RED}TLS_DOMAIN должен быть доменным именем без пробелов.${NC}"
+    read -r -p "TLS-проверка не прошла. Всё равно использовать этот домен? [y/N] " answer
+    [[ "$answer" =~ ^[Yy]$ ]] && return 0
   done
 }
 
@@ -292,7 +354,7 @@ read_support_settings() {
 }
 
 read_payment_settings() {
-  local choice answer
+  local choice
   while true; do
     echo "Выберите режим оплаты:"
     echo
@@ -313,9 +375,9 @@ read_payment_settings() {
     esac
   done
 
-  read -r -p "Включить автоматическую тестовую выдачу ключа без оплаты? [y/N]: " answer
-  if [[ "$answer" =~ ^[Yy]$ ]]; then
+  if [[ "$WIZARD_PAYMENT_MODE" == "auto_free" ]]; then
     WIZARD_DEV_AUTO_ISSUE="true"
+    echo -e "${YELLOW}Для auto_free тестовая автоматическая выдача включена.${NC}"
   else
     WIZARD_DEV_AUTO_ISSUE="false"
   fi
@@ -349,6 +411,7 @@ DATABASE_PATH=/app/data/shop.db
 
 PAYMENT_MODE=${WIZARD_PAYMENT_MODE}
 DEV_AUTO_ISSUE=${WIZARD_DEV_AUTO_ISSUE}
+PAYMENTS_ENABLED=true
 EOF
   chmod 600 .env
 }
@@ -490,7 +553,7 @@ first_setup_wizard() {
 
   if ! check_telegram_token "$WIZARD_BOT_TOKEN"; then
     echo -e "${RED}После запуска не удалось повторно проверить BOT_TOKEN через Telegram API.${NC}"
-    echo "Контейнер запущен, но установка требует проверки сети и токена через пункт 21."
+    echo "Контейнер запущен, но установка требует проверки сети и токена через пункт 23."
     return 1
   fi
   WIZARD_BOT_USERNAME="$TELEGRAM_BOT_USERNAME"
@@ -1054,6 +1117,290 @@ check_installation() {
   echo -e "${GREEN}✅ Для админки напишите /admin.${NC}"
 }
 
+change_payment_mode() {
+  echo
+  need_env || return 1
+  local current_enabled current_mode current_auto choice answer new_enabled new_mode new_auto
+  current_enabled="$(get_env_value PAYMENTS_ENABLED)"
+  current_mode="$(get_env_value PAYMENT_MODE)"
+  current_auto="$(get_env_value DEV_AUTO_ISSUE)"
+  echo -e "${BLUE}PAYMENTS_ENABLED:${NC} ${current_enabled:-true}"
+  echo -e "${BLUE}Текущий режим оплаты:${NC} ${current_mode:-manual}"
+  echo -e "${BLUE}DEV_AUTO_ISSUE:${NC} ${current_auto:-false}"
+  echo
+  echo "1) Включить ручную оплату manual"
+  echo "2) Выключить продажи"
+  echo "3) Включить тестовую авто-выдачу auto_free"
+  echo "4) Показать статус оплаты"
+  echo "0) Назад"
+  read -r -p "Ваш выбор: " choice
+  case "$choice" in
+    1) new_enabled="true"; new_mode="manual"; new_auto="false" ;;
+    2) new_enabled="false"; new_mode="manual"; new_auto="false" ;;
+    3) new_enabled="true"; new_mode="auto_free"; new_auto="true" ;;
+    4)
+      echo
+      echo -e "${BLUE}Статус оплаты:${NC}"
+      echo "  PAYMENTS_ENABLED=${current_enabled:-true}"
+      echo "  PAYMENT_MODE=${current_mode:-manual}"
+      echo "  DEV_AUTO_ISSUE=${current_auto:-false}"
+      echo "  stars/crypto зарезервированы и пока не реализованы."
+      return 0
+      ;;
+    0|"") echo "Отменено"; return 0 ;;
+    *) echo -e "${RED}Неверный выбор.${NC}"; return 1 ;;
+  esac
+  set_env_value PAYMENTS_ENABLED "$new_enabled" || return 1
+  set_env_value PAYMENT_MODE "$new_mode" || return 1
+  set_env_value DEV_AUTO_ISSUE "$new_auto" || return 1
+  echo -e "${GREEN}✅ .env обновлён: PAYMENTS_ENABLED=${new_enabled}, PAYMENT_MODE=${new_mode}, DEV_AUTO_ISSUE=${new_auto}${NC}"
+  read -r -p "Применить сейчас? Пересоздать bot и support_bot? [y/N] " answer
+  if [[ "$answer" =~ ^[Yy]$ ]]; then
+    $COMPOSE_CMD up -d --build --force-recreate bot support_bot
+  else
+    echo "Изменения вступят в силу после ручного рестарта (пункт 17)."
+  fi
+}
+
+check_tls_domain() {
+  local domain="$1"
+  if ! command -v openssl >/dev/null 2>&1; then
+    echo -e "${RED}openssl не установлен.${NC}"
+    return 1
+  fi
+  echo -e "${BLUE}Проверяю TLS handshake до ${domain}:443...${NC}"
+  local out rc=0
+  out="$(echo | timeout 10 openssl s_client \
+    -connect "${domain}:443" \
+    -servername "${domain}" \
+    -brief 2>&1)" || rc=$?
+  if [[ "$rc" -eq 0 ]] && grep -qE "Verification:? (OK|success)" <<<"$out"; then
+    echo -e "${GREEN}✅ TLS handshake до ${domain}:443 успешен.${NC}"
+    grep -E "Protocol|Cipher|Verification|Subject|Server certificate" <<<"$out" || true
+    return 0
+  fi
+  echo -e "${RED}❌ TLS handshake не удался (rc=${rc}).${NC}"
+  printf '%s\n' "$out" | tail -n 20
+  return 1
+}
+
+check_tls_candidates() {
+  local domain
+  local -a domains=("petrovich.ru" "www.cloudflare.com" "www.microsoft.com" "www.apple.com")
+  echo -e "${YELLOW}Проверка выполняется с этой VPS и не гарантирует доступность у всех операторов РФ.${NC}"
+  for domain in "${domains[@]}"; do
+    echo
+    check_tls_domain "$domain" || true
+  done
+}
+
+patch_telemt_tls_domain() {
+  local new_domain="$1"
+  if [[ ! -f telemt/config.toml ]]; then
+    echo -e "${RED}telemt/config.toml не найден. Сначала выполните пункт 1.${NC}"
+    return 1
+  fi
+  if [[ "$(grep -cE '^tls_domain = ".*"$' telemt/config.toml || true)" -ne 1 ]]; then
+    echo -e "${RED}В telemt/config.toml должна быть ровно одна строка tls_domain.${NC}"
+    return 1
+  fi
+  sed -i -E "s|^tls_domain = \".*\"|tls_domain = \"${new_domain}\"|" telemt/config.toml
+  echo -e "${GREEN}✅ telemt/config.toml обновлён (tls_domain → ${new_domain}).${NC}"
+}
+
+patch_telemt_public_host() {
+  local new_host="$1"
+  if [[ ! -f telemt/config.toml ]]; then
+    echo -e "${RED}telemt/config.toml не найден. Сначала выполните пункт 1.${NC}"
+    return 1
+  fi
+  if [[ "$(grep -cE '^public_host = ".*"$' telemt/config.toml || true)" -ne 1 ]]; then
+    echo -e "${RED}В telemt/config.toml должна быть ровно одна строка public_host.${NC}"
+    return 1
+  fi
+  sed -i -E "s|^public_host = \".*\"|public_host = \"${new_host}\"|" telemt/config.toml
+  echo -e "${GREEN}✅ telemt/config.toml обновлён (public_host → ${new_host}).${NC}"
+}
+
+recreate_proxy_and_bots_with_check() {
+  local attempt
+  echo -e "${BLUE}Пересоздаю MTProto proxy и Telegram-ботов...${NC}"
+  $COMPOSE_CMD up -d --build --force-recreate mtproto bot support_bot || return 1
+  echo
+  $COMPOSE_CMD ps mtproto || true
+  echo -e "${BLUE}Проверяю TeleMT API из контейнера bot...${NC}"
+  for attempt in {1..15}; do
+    if $COMPOSE_CMD exec -T bot python -c \
+      "import urllib.request; urllib.request.urlopen('http://mtproto:9091/v1/users', timeout=3).read()" \
+      >/dev/null 2>&1; then
+      echo -e "${GREEN}✅ TeleMT API доступен из контейнера bot.${NC}"
+      return 0
+    fi
+    sleep 2
+  done
+  echo -e "${RED}❌ TeleMT API недоступен из контейнера bot после пересоздания.${NC}"
+  return 1
+}
+
+rollback_tls_domain() {
+  local current previous answer backup suffix config_backup
+  local -a backups=()
+  shopt -s nullglob
+  backups=(backups/.env.tls-domain.bak-*)
+  shopt -u nullglob
+  if (( ${#backups[@]} == 0 )); then
+    echo -e "${RED}Резервная копия последней смены TLS_DOMAIN не найдена.${NC}"
+    return 1
+  fi
+  backup="${backups[${#backups[@]} - 1]}"
+  suffix="${backup#backups/.env.tls-domain.bak-}"
+  config_backup="backups/telemt-config.toml.tls-domain.bak-${suffix}"
+  [[ -f "$config_backup" ]] \
+    || { echo -e "${RED}Парная резервная копия telemt/config.toml не найдена.${NC}"; return 1; }
+  previous="$(sed -n 's/^TLS_DOMAIN=//p' "$backup" | tail -n 1)"
+  current="$(get_env_value TLS_DOMAIN)"
+  [[ "$previous" =~ ^[A-Za-z0-9.-]+$ ]] \
+    || { echo -e "${RED}В резервной копии найден некорректный TLS_DOMAIN.${NC}"; return 1; }
+  read -r -p "Откатить TLS_DOMAIN с '${current:-не задан}' на '${previous}'? [y/N] " answer
+  [[ "$answer" =~ ^[Yy]$ ]] || { echo "Отменено"; return 0; }
+  backup_runtime_settings "tls-domain" || return 1
+  patch_telemt_tls_domain "$previous" || return 1
+  set_env_value TLS_DOMAIN "$previous" || return 1
+  echo -e "${GREEN}✅ TLS_DOMAIN восстановлен из ${backup}.${NC}"
+  echo -e "${YELLOW}После смены TLS_DOMAIN активным клиентам нужно заново нажать 🔑 Мои ключи и подключить новую ссылку.${NC}"
+  read -r -p "Применить откат сейчас? Пересоздать mtproto, bot и support_bot? [Y/n] " answer
+  if [[ ! "$answer" =~ ^[Nn]$ ]]; then
+    recreate_proxy_and_bots_with_check || true
+  else
+    echo "Откат вступит в силу после ручного рестарта (пункт 19)."
+  fi
+}
+
+change_tls_domain() {
+  echo
+  need_env || return 1
+  local current new_domain choice answer
+  current="$(get_env_value TLS_DOMAIN)"
+  echo -e "${BLUE}Текущий TLS_DOMAIN:${NC} ${current:-не задан}"
+  echo
+  echo "1) Проверить текущий TLS_DOMAIN"
+  echo "2) Сменить на petrovich.ru (официальный пример TeleMT)"
+  echo "3) Сменить на www.cloudflare.com"
+  echo "4) Проверить кандидатов TLS_DOMAIN с этой VPS"
+  echo "5) Ввести свой домен"
+  echo "6) Откатить последнюю смену TLS_DOMAIN"
+  echo "0) Назад"
+  read -r -p "Ваш выбор: " choice
+  case "$choice" in
+    1)
+      [[ -n "$current" ]] || { echo -e "${RED}TLS_DOMAIN не задан в .env.${NC}"; return 1; }
+      check_tls_domain "$current"
+      return $?
+      ;;
+    2) new_domain="petrovich.ru" ;;
+    3) new_domain="www.cloudflare.com" ;;
+    4)
+      check_tls_candidates
+      return 0
+      ;;
+    5)
+      read -r -p "Введите домен: " new_domain
+      [[ "$new_domain" =~ ^[A-Za-z0-9.-]+$ ]] \
+        || { echo -e "${RED}Некорректный домен.${NC}"; return 1; }
+      ;;
+    6) rollback_tls_domain; return $? ;;
+    0|"") echo "Отменено"; return 0 ;;
+    *) echo -e "${RED}Неверный выбор.${NC}"; return 1 ;;
+  esac
+  if ! check_tls_domain "$new_domain"; then
+    read -r -p "TLS-проверка не прошла. Всё равно применить? [y/N] " answer
+    [[ "$answer" =~ ^[Yy]$ ]] || { echo "Отменено"; return 0; }
+  fi
+  backup_runtime_settings "tls-domain" || return 1
+  patch_telemt_tls_domain "$new_domain" || return 1
+  set_env_value TLS_DOMAIN "$new_domain" || return 1
+  echo -e "${YELLOW}После смены TLS_DOMAIN активным клиентам нужно заново нажать 🔑 Мои ключи и подключить новую ссылку.${NC}"
+  read -r -p "Применить сейчас? Пересоздать mtproto, bot и support_bot? [y/N] " answer
+  if [[ "$answer" =~ ^[Yy]$ ]]; then
+    if ! recreate_proxy_and_bots_with_check; then
+      echo -e "${YELLOW}Проверка после смены TLS_DOMAIN не прошла.${NC}"
+      read -r -p "Предложение: откатить последнюю смену TLS_DOMAIN сейчас? [y/N] " answer
+      [[ "$answer" =~ ^[Yy]$ ]] && rollback_tls_domain
+    fi
+  else
+    echo "Изменения вступят в силу после ручного рестарта (пункт 19)."
+  fi
+}
+
+validate_server_host() {
+  local host="$1"
+  [[ "$host" =~ ^[A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?$ ]]
+}
+
+check_server_host() {
+  local host="$1"
+  if [[ "$host" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]]; then
+    echo -e "${GREEN}SERVER_HOST задан как IP-адрес: ${host}${NC}"
+    return 0
+  fi
+  if command -v getent >/dev/null 2>&1 && getent ahostsv4 "$host" >/dev/null 2>&1; then
+    getent ahostsv4 "$host" | sed -n '1,3p'
+    echo -e "${GREEN}✅ Домен ${host} разрешается через DNS.${NC}"
+    return 0
+  fi
+  echo -e "${RED}Не удалось разрешить домен ${host} через DNS.${NC}"
+  return 1
+}
+
+change_server_host() {
+  echo
+  need_env || return 1
+  local current new_host external_ip choice answer
+  current="$(get_env_value SERVER_HOST)"
+  echo -e "${BLUE}Текущий SERVER_HOST:${NC} ${current:-не задан}"
+  echo "SERVER_HOST — адрес сервера в ссылке (server=...), а TLS_DOMAIN — домен маскировки."
+  echo
+  echo "1) Показать текущий SERVER_HOST"
+  echo "2) Проверить DNS/IP"
+  echo "3) Сменить на внешний IP сервера"
+  echo "4) Ввести свой домен"
+  echo "0) Назад"
+  read -r -p "Ваш выбор: " choice
+  case "$choice" in
+    1) echo "SERVER_HOST=${current:-не задан}"; return 0 ;;
+    2)
+      [[ -n "$current" ]] || { echo -e "${RED}SERVER_HOST не задан в .env.${NC}"; return 1; }
+      check_server_host "$current"
+      return $?
+      ;;
+    3)
+      external_ip="$(curl -4 -fsS --max-time 10 ifconfig.me 2>/dev/null || true)"
+      [[ "$external_ip" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]] \
+        || { echo -e "${RED}Не удалось определить внешний IP сервера.${NC}"; return 1; }
+      new_host="$external_ip"
+      echo "Найден внешний IP: ${new_host}"
+      ;;
+    4)
+      read -r -p "Введите домен SERVER_HOST: " new_host
+      echo -e "${YELLOW}Домен должен иметь A-запись на IP VPS. Cloudflare должен быть DNS only / серое облако. Обычный Cloudflare proxy не проксирует MTProto без Spectrum.${NC}"
+      ;;
+    0|"") echo "Отменено"; return 0 ;;
+    *) echo -e "${RED}Неверный выбор.${NC}"; return 1 ;;
+  esac
+  validate_server_host "$new_host" \
+    || { echo -e "${RED}Некорректный SERVER_HOST. Укажите IP или домен без пробелов, порта и протокола.${NC}"; return 1; }
+  backup_runtime_settings "server-host" || return 1
+  patch_telemt_public_host "$new_host" || return 1
+  set_env_value SERVER_HOST "$new_host" || return 1
+  echo -e "${YELLOW}После смены SERVER_HOST активным клиентам нужно заново нажать 🔑 Мои ключи и подключить новую ссылку.${NC}"
+  read -r -p "Применить сейчас? Пересоздать mtproto, bot и support_bot? [y/N] " answer
+  if [[ "$answer" =~ ^[Yy]$ ]]; then
+    recreate_proxy_and_bots_with_check || echo -e "${RED}Проверьте логи mtproto и bot; новые настройки сохранены, но проверка API не пройдена.${NC}"
+  else
+    echo "Изменения вступят в силу после ручного рестарта (пункт 19)."
+  fi
+}
+
 while true; do
   print_header
   echo "1) 🧙 Первичная установка с нуля"
@@ -1079,6 +1426,9 @@ while true; do
   echo "21) 📄 Логи бота поддержки"
   echo "22) 🛡 Установить watcher автоматического рестарта"
   echo "23) 🧪 Проверка установки"
+  echo "24) ⚙️ Изменить способ оплаты"
+  echo "25) 🌐 Проверить/сменить TLS_DOMAIN"
+  echo "26) 🌍 Проверить/сменить адрес сервера SERVER_HOST"
   echo "0) 🚪 Выход"
   echo
   read -r -p "Выберите действие: " choice
@@ -1107,6 +1457,9 @@ while true; do
     21) show_support_bot_logs || true ;;
     22) install_restart_watcher || true; pause ;;
     23) check_installation || true; pause ;;
+    24) change_payment_mode || true; pause ;;
+    25) change_tls_domain || true; pause ;;
+    26) change_server_host || true; pause ;;
     0) exit 0 ;;
     *) echo "Неверный пункт"; pause ;;
   esac

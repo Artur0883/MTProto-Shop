@@ -1,29 +1,84 @@
-import argparse
+"""Business-level proxy management on top of TeleMT HTTP API.
+
+Public API is async. CLI (`python proxy_manager.py …`) wraps it via asyncio.run
+so manage.sh and ad-hoc admin commands keep working unchanged.
+"""
+from __future__ import annotations
+
 import asyncio
-import json
-import logging
 import re
 import secrets
-import urllib.error
-import urllib.request
-from urllib.parse import parse_qs, urlencode, urlparse
+import time
+from pathlib import Path
+from typing import Any
+from urllib.parse import urlencode
 
 from config import get_settings
+from logging_setup import get_logger
+from telemt_client import (
+    CircuitOpenError,
+    ClientNotFoundError,
+    TeleMTError,
+    api_call,
+    close_telemt,
+    get_circuit_state,
+    is_available,
+)
+
+
+logger = get_logger(__name__)
 
 
 SECRET_RE = re.compile(r"^[0-9a-f]{32}$")
 CLIENT_RE = re.compile(r"^[A-Za-z0-9_.-]{1,64}$")
-SECURE_SECRET_PREFIX = "dd"
-TLS_SECRET_PREFIX = "ee"
-DEFAULT_TIMEOUT = 5.0
 
 
-class ClientNotFoundError(ValueError):
-    pass
+# Re-export for callers (admin.py, client.py, subscriptions.py).
+__all__ = [
+    "CircuitOpenError",
+    "ClientNotFoundError",
+    "TeleMTError",
+    "RotateCooldownError",
+    "build_alternative_links",
+    "build_tls_proxy_link",
+    "create_secret",
+    "delete_secret",
+    "generate_secret",
+    "get_circuit_state",
+    "get_link",
+    "is_available",
+    "list_clients",
+    "mask_secret",
+    "rotate_secret",
+    "validate_client_id",
+    "validate_secret",
+]
+
+
+class RotateCooldownError(TeleMTError):
+    """Raised when a rotate is requested before the per-client cooldown elapses."""
+
+    def __init__(self, retry_after: float, client_id: str) -> None:
+        super().__init__(
+            f"rotate cooldown active for {client_id}: retry in {retry_after:.1f}s"
+        )
+        self.retry_after = retry_after
+        self.client_id = client_id
+
+
+_rotate_last: dict[str, float] = {}
+_rotate_lock: asyncio.Lock | None = None
+
+
+def _get_rotate_lock() -> asyncio.Lock:
+    global _rotate_lock
+    if _rotate_lock is None:
+        _rotate_lock = asyncio.Lock()
+    return _rotate_lock
 
 
 def mask_secret(secret: str) -> str:
-    if len(secret) <= 10:
+    if not secret or len(secret) <= 10:
         return "***"
     return f"{secret[:6]}...{secret[-4:]}"
 
@@ -33,32 +88,23 @@ def generate_secret() -> str:
 
 
 def validate_client_id(client_id: str) -> None:
+    if not client_id or Path(client_id).name != client_id:
+        raise ValueError("client_id должен быть валидным именем")
     if not CLIENT_RE.fullmatch(client_id):
-        raise ValueError("client_id must be 1-64 chars: letters, digits, _, . or -")
+        raise ValueError(
+            "client_id должен содержать только буквы, цифры, _, ., - (1-64 символа)"
+        )
 
 
 def validate_secret(secret: str) -> None:
-    if not SECRET_RE.fullmatch(secret):
-        raise ValueError("secret must be exactly 32 lowercase hex chars")
-
-
-def build_proxy_link(server_host: str, proxy_port: int, secret: str) -> str:
-    public_secret = f"{SECURE_SECRET_PREFIX}{secret}"
-    params = urlencode(
-        {
-            "server": server_host,
-            "port": str(proxy_port),
-            "secret": public_secret,
-        }
-    )
-    return f"tg://proxy?{params}"
+    if not SECRET_RE.fullmatch(secret.lower()):
+        raise ValueError("secret должен быть 32 символа в hex (0-9, a-f)")
 
 
 def build_tls_proxy_link(
     server_host: str, proxy_port: int, secret: str, tls_domain: str
 ) -> str:
-    domain_hex = tls_domain.encode("utf-8").hex()
-    public_secret = f"{TLS_SECRET_PREFIX}{secret}{domain_hex}"
+    public_secret = f"ee{secret.lower()}"
     params = urlencode(
         {
             "server": server_host,
@@ -69,289 +115,261 @@ def build_tls_proxy_link(
     return f"tg://proxy?{params}"
 
 
-def _api_request(
-    method: str, path: str, body: dict | None = None
-) -> dict | list | None:
+def build_alternative_links(
+    secret: str, *, max_count: int = 3, preferred_domain: str | None = None
+) -> list[tuple[str, str]]:
+    """Return ordered (domain, link) pairs across all known TLS domains.
+
+    `preferred_domain`, if provided and valid, is placed first.
+    """
     settings = get_settings()
-    url = f"{settings.telemt_api_url}{path}"
-    data = json.dumps(body).encode("utf-8") if body is not None else None
-    headers = {"Content-Type": "application/json"} if body is not None else {}
-    request = urllib.request.Request(url, data=data, method=method, headers=headers)
-    try:
-        with urllib.request.urlopen(request, timeout=DEFAULT_TIMEOUT) as response:
-            raw = response.read()
-            if not raw:
-                return None
-            try:
-                return json.loads(raw)
-            except json.JSONDecodeError as exc:
-                raise RuntimeError(
-                    f"telemt API {method} {path} returned invalid JSON"
-                ) from exc
-    except urllib.error.HTTPError as exc:
-        if exc.code == 404:
-            raise ClientNotFoundError(f"telemt 404 for {method} {path}") from exc
-        raise RuntimeError(
-            f"telemt API {method} {path} failed: {exc.code} {exc.reason}"
-        ) from exc
-    except urllib.error.URLError as exc:
-        raise RuntimeError(
-            f"telemt API {method} {path} unreachable: {exc.reason}"
-        ) from exc
+    domains = list(settings.fallback_tls_domains)
+    if preferred_domain and preferred_domain in domains:
+        domains.remove(preferred_domain)
+        domains.insert(0, preferred_domain)
+    domains = domains[:max_count]
+    return [
+        (
+            d,
+            build_tls_proxy_link(settings.server_host, settings.proxy_port, secret, d),
+        )
+        for d in domains
+    ]
 
 
-def _response_data(response: object) -> object:
-    if isinstance(response, dict) and "data" in response:
-        return response["data"]
-    return response
-
-
-def _secret_from_link(link: str) -> str | None:
-    secret_values = parse_qs(urlparse(link).query).get("secret", [])
-    if not secret_values:
+def _extract_secret(data: Any) -> str | None:
+    """Pull a 32-hex secret out of various TeleMT response shapes."""
+    if data is None:
         return None
-    public_secret = secret_values[0].lower()
-    if public_secret.startswith((SECURE_SECRET_PREFIX, TLS_SECRET_PREFIX)):
-        secret = public_secret[2:34]
-    else:
-        secret = public_secret[:32]
-    return secret if SECRET_RE.fullmatch(secret) else None
-
-
-def _extract_secret(entry: object) -> str | None:
-    if entry is None:
-        return None
-    if isinstance(entry, str):
-        candidate = entry.lower()
-        if SECRET_RE.fullmatch(candidate):
-            return candidate
-        return _secret_from_link(entry)
-    if isinstance(entry, dict):
-        for key in ("secret", "client_secret"):
-            value = entry.get(key)
+    if isinstance(data, str):
+        return data.lower() if SECRET_RE.fullmatch(data.lower()) else None
+    if isinstance(data, dict):
+        for key in ("secret", "client_secret", "password", "key"):
+            value = data.get(key)
             if isinstance(value, str) and SECRET_RE.fullmatch(value.lower()):
                 return value.lower()
-        for key in ("data", "user"):
-            value = _extract_secret(entry.get(key))
-            if value:
-                return value
-        links = entry.get("links")
-        if isinstance(links, dict):
-            for mode in ("tls", "secure", "classic"):
-                values = links.get(mode) or []
-                if isinstance(values, list):
-                    for link in values:
-                        if isinstance(link, str):
-                            value = _secret_from_link(link)
-                            if value:
-                                return value
+        for nested in ("user", "data", "result", "client"):
+            nv = data.get(nested)
+            if isinstance(nv, dict):
+                found = _extract_secret(nv)
+                if found:
+                    return found
     return None
 
 
-def _extract_tls_link(entry: object) -> str | None:
-    if isinstance(entry, dict):
-        for key in ("data", "user"):
-            link = _extract_tls_link(entry.get(key))
-            if link:
-                return link
-        links = entry.get("links")
-        if isinstance(links, dict):
-            tls_links = links.get("tls") or []
-            if isinstance(tls_links, list) and tls_links:
-                if isinstance(tls_links[0], str):
-                    return tls_links[0]
-    return None
-
-
-def create_secret(client_id: str, provided_secret: str | None = None) -> str:
+async def create_secret(client_id: str, provided_secret: str | None = None) -> str:
+    """Create or return an existing TeleMT user; idempotent."""
     validate_client_id(client_id)
     secret = (provided_secret or generate_secret()).lower()
     validate_secret(secret)
+
     try:
-        existing = _api_request("GET", f"/v1/users/{client_id}")
-        current = _extract_secret(existing)
-        if current:
-            return current
+        existing = await api_call("GET", f"/v1/users/{client_id}")
+        existing_secret = _extract_secret(existing)
+        if existing_secret:
+            return existing_secret
     except ClientNotFoundError:
         pass
-    response = _api_request(
-        "POST", "/v1/users", {"username": client_id, "secret": secret}
-    )
-    effective_secret = _extract_secret(response) or secret
-    logging.info("Created secret for %s: %s", client_id, mask_secret(effective_secret))
-    return effective_secret
+
+    await api_call("POST", "/v1/users", {"username": client_id, "secret": secret})
+    logger.info("event=secret_created", client_id=client_id, secret=secret)
+    return secret
 
 
-def delete_secret(client_id: str) -> str:
+async def delete_secret(client_id: str) -> str:
+    """Delete a TeleMT user. Returns the previously-known secret if it could
+    be fetched (best-effort)."""
     validate_client_id(client_id)
     settings = get_settings()
     if client_id == settings.telemt_system_user:
-        raise ValueError(f"refusing to delete system user '{client_id}'")
+        raise ValueError(f"Нельзя удалять системного пользователя {client_id}")
+
+    secret_known = ""
     try:
-        existing = _api_request("GET", f"/v1/users/{client_id}")
+        existing = await api_call("GET", f"/v1/users/{client_id}")
+        secret_known = _extract_secret(existing) or ""
     except ClientNotFoundError:
-        raise ClientNotFoundError(f"client '{client_id}' not found")
-    secret = _extract_secret(existing) or ""
+        raise ClientNotFoundError(f"Клиент {client_id} не найден")
+
     try:
-        _api_request("DELETE", f"/v1/users/{client_id}")
+        await api_call("DELETE", f"/v1/users/{client_id}")
     except ClientNotFoundError:
-        raise ClientNotFoundError(f"client '{client_id}' not found")
-    logging.info("Deleted secret for %s: %s", client_id, mask_secret(secret))
-    return secret
+        raise ClientNotFoundError(f"Клиент {client_id} не найден")
+
+    logger.info("event=secret_deleted", client_id=client_id, secret=secret_known)
+    return secret_known
 
 
-def rotate_secret(client_id: str) -> str:
+async def rotate_secret(client_id: str) -> str:
+    """Rotate a TeleMT user's secret. Enforces per-client API cooldown."""
     validate_client_id(client_id)
+    settings = get_settings()
+
+    async with _get_rotate_lock():
+        last = _rotate_last.get(client_id)
+        now = time.monotonic()
+        if last is not None:
+            elapsed = now - last
+            if elapsed < settings.telemt_rotate_cooldown:
+                raise RotateCooldownError(
+                    settings.telemt_rotate_cooldown - elapsed, client_id
+                )
+        _rotate_last[client_id] = now
+
     new_secret = generate_secret()
     try:
-        response = _api_request(
-            "POST", f"/v1/users/{client_id}/rotate-secret", {"secret": new_secret}
+        resp = await api_call(
+            "POST",
+            f"/v1/users/{client_id}/rotate-secret",
+            {"secret": new_secret},
         )
     except ClientNotFoundError:
-        raise ClientNotFoundError(f"client '{client_id}' not found")
-    secret = _extract_secret(response) or new_secret
-    logging.info("Rotated secret for %s: %s", client_id, mask_secret(secret))
-    return secret
+        raise ClientNotFoundError(f"Клиент {client_id} не найден")
+
+    actual = _extract_secret(resp) or new_secret
+    logger.info("event=secret_rotated", client_id=client_id, secret=actual)
+    return actual
 
 
-async def rotate_telegram_secret(telegram_id: int) -> str:
-    from database import (
-        get_latest_subscription_by_telegram_id,
-        update_latest_subscription_secret_by_telegram_id,
-    )
+async def get_link(client_id: str) -> str:
+    """Return a TLS-masked tg://proxy link for a client.
 
-    settings = get_settings()
-    subscription = await get_latest_subscription_by_telegram_id(
-        settings.database_path,
-        telegram_id,
-    )
-    if subscription is None:
-        raise ClientNotFoundError(
-            f"subscription for telegram_id '{telegram_id}' not found"
-        )
-
-    client_id = f"tg_{telegram_id}"
-    secret = rotate_secret(client_id)
-    updated = await update_latest_subscription_secret_by_telegram_id(
-        settings.database_path,
-        telegram_id,
-        secret,
-    )
-    if updated is None:
-        raise ClientNotFoundError(
-            f"subscription for telegram_id '{telegram_id}' not found"
-        )
-    return secret
-
-
-def get_link(client_id: str) -> str:
+    Prefers TeleMT-supplied TLS links if present; otherwise constructs the link
+    locally using the primary TLS domain.
+    """
     validate_client_id(client_id)
     settings = get_settings()
+
     try:
-        response = _api_request("GET", f"/v1/users/{client_id}")
+        resp = await api_call("GET", f"/v1/users/{client_id}")
     except ClientNotFoundError:
-        raise ClientNotFoundError(f"client '{client_id}' not found")
-    tls_link = _extract_tls_link(response)
-    if tls_link:
-        return tls_link
-    secret = _extract_secret(response) or ""
+        raise ClientNotFoundError(f"Клиент {client_id} не найден")
+
+    api_link = _extract_tls_link(resp)
+    if api_link:
+        return api_link
+
+    secret = _extract_secret(resp)
     if not secret:
-        raise RuntimeError(f"client '{client_id}' has no TLS link or secret")
+        secret = await create_secret(client_id)
     return build_tls_proxy_link(
-        settings.server_host,
-        settings.proxy_port,
-        secret,
-        settings.tls_domain,
+        settings.server_host, settings.proxy_port, secret, settings.tls_domain
     )
 
 
-def list_clients() -> dict[str, str]:
+def _extract_tls_link(resp: Any) -> str | None:
+    if not isinstance(resp, dict):
+        return None
+    candidates = []
+    for root in (resp, resp.get("user")):
+        if isinstance(root, dict):
+            links = root.get("links")
+            if isinstance(links, dict):
+                candidates.append(links)
+    for links in candidates:
+        for key in ("tls", "secure"):
+            value = links.get(key)
+            if isinstance(value, list) and value and isinstance(value[0], str):
+                return value[0]
+            if isinstance(value, str) and value:
+                return value
+    return None
+
+
+async def list_clients() -> dict[str, str]:
     settings = get_settings()
-    response = _response_data(_api_request("GET", "/v1/users") or [])
-    users = response.get("users") if isinstance(response, dict) else response
+    try:
+        resp = await api_call("GET", "/v1/users")
+    except (TeleMTError, CircuitOpenError) as exc:
+        logger.error("event=list_clients_failed", error=str(exc))
+        return {}
+
+    if resp is None:
+        return {}
+
+    if isinstance(resp, list):
+        users: Any = resp
+    elif isinstance(resp, dict):
+        users = resp.get("users") or resp
+    else:
+        return {}
+
     result: dict[str, str] = {}
     if isinstance(users, list):
         for entry in users:
             if not isinstance(entry, dict):
                 continue
             name = entry.get("username") or entry.get("name")
-            if not isinstance(name, str) or name == settings.telemt_system_user:
+            if not name or name == settings.telemt_system_user:
                 continue
-            result[name] = _extract_secret(entry) or ""
+            secret = _extract_secret(entry) or ""
+            result[name] = secret.lower()
     elif isinstance(users, dict):
         for name, entry in users.items():
             if name == settings.telemt_system_user:
                 continue
-            result[str(name)] = _extract_secret(entry) or ""
+            if isinstance(entry, str):
+                if SECRET_RE.fullmatch(entry.lower()):
+                    result[name] = entry.lower()
+            else:
+                secret = _extract_secret(entry) or ""
+                result[name] = secret.lower()
     return result
 
 
-def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Manage TeleMT users via HTTP API")
+# ==================== CLI ====================
+async def _cli_main() -> int:
+    import argparse
+
+    parser = argparse.ArgumentParser(description="TeleMT Proxy Manager")
     subparsers = parser.add_subparsers(dest="command", required=True)
 
-    create = subparsers.add_parser("create", help="create a secret for client")
-    create.add_argument("client_id")
-    create.add_argument("--secret", help="optional 32 hex chars secret")
+    p = subparsers.add_parser("create", help="Создать секрет")
+    p.add_argument("client_id")
+    p.add_argument("--secret", help="Задать секрет вручную")
 
-    delete = subparsers.add_parser("delete", help="delete client secret")
-    delete.add_argument("client_id")
+    for cmd in ("delete", "link", "rotate"):
+        p = subparsers.add_parser(cmd, help=f"Команда {cmd}")
+        p.add_argument("client_id")
 
-    rotate = subparsers.add_parser("rotate", help="generate a new secret for client")
-    rotate.add_argument("client_id")
+    subparsers.add_parser("list", help="Список клиентов")
 
-    rotate_tg = subparsers.add_parser(
-        "rotate-telegram",
-        help="generate a new secret for Telegram user and sync latest subscription in DB",
-    )
-    rotate_tg.add_argument("telegram_id", type=int)
-
-    link = subparsers.add_parser("link", help="print proxy link for client")
-    link.add_argument("client_id")
-
-    subparsers.add_parser("list", help="list clients with masked secrets")
-
-    return parser
+    args = parser.parse_args()
+    rc = 0
+    try:
+        if args.command == "create":
+            secret = await create_secret(args.client_id, args.secret)
+            print(await get_link(args.client_id))
+            print(f"Создан {args.client_id}: {mask_secret(secret)}")
+        elif args.command == "delete":
+            secret = await delete_secret(args.client_id)
+            print(f"Удалён {args.client_id}: {mask_secret(secret)}")
+        elif args.command == "rotate":
+            secret = await rotate_secret(args.client_id)
+            print(await get_link(args.client_id))
+            print(f"Обновлён {args.client_id}: {mask_secret(secret)}")
+        elif args.command == "link":
+            print(await get_link(args.client_id))
+        elif args.command == "list":
+            users = await list_clients()
+            if not users:
+                print("Клиентов нет")
+            for cid, sec in sorted(users.items()):
+                print(f"{cid}: {mask_secret(sec)}")
+    except Exception as exc:
+        logger.error("event=cli_failed", command=args.command, error=str(exc))
+        print(f"ERROR: {exc}")
+        rc = 1
+    finally:
+        await close_telemt()
+    return rc
 
 
 def main() -> int:
-    logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
-    args = build_parser().parse_args()
+    from logging_setup import configure_logging
 
-    try:
-        if args.command == "create":
-            secret = create_secret(args.client_id, args.secret)
-            print(get_link(args.client_id))
-            print(f"created {args.client_id}: {mask_secret(secret)}")
-            print("apply changes via TeleMT API")
-        elif args.command == "delete":
-            secret = delete_secret(args.client_id)
-            print(f"deleted {args.client_id}: {mask_secret(secret)}")
-            print("apply changes via TeleMT API")
-        elif args.command == "rotate":
-            secret = rotate_secret(args.client_id)
-            print(get_link(args.client_id))
-            print(f"rotated {args.client_id}: {mask_secret(secret)}")
-            print("apply changes via TeleMT API")
-        elif args.command == "rotate-telegram":
-            secret = asyncio.run(rotate_telegram_secret(args.telegram_id))
-            print(get_link(f"tg_{args.telegram_id}"))
-            print(f"rotated tg_{args.telegram_id}: {mask_secret(secret)}")
-            print("subscription secret in SQLite was updated")
-            print("apply changes via TeleMT API")
-        elif args.command == "link":
-            print(get_link(args.client_id))
-        elif args.command == "list":
-            users = list_clients()
-            if not users:
-                print("no clients")
-            for client_id, secret in sorted(users.items()):
-                print(f"{client_id}: {mask_secret(secret)}")
-    except Exception as exc:
-        logging.error("%s", exc)
-        return 1
-
-    return 0
+    configure_logging(level="INFO", fmt="console")
+    return asyncio.run(_cli_main())
 
 
 if __name__ == "__main__":

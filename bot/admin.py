@@ -1,16 +1,14 @@
 import asyncio
 from datetime import UTC, datetime, timedelta
 from html import escape
-import logging
 from pathlib import Path
 import shutil
-import socket
 
 from aiogram import Bot, F, Router
 from aiogram.exceptions import TelegramForbiddenError
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
-from aiogram.fsm.state import State, StatesGroup
+from aiogram.fsm.state import StatesGroup, State
 from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
 
 from config import get_settings
@@ -46,17 +44,25 @@ from keyboards import (
     tariff_keyboard,
     user_card_keyboard,
 )
+from logging_setup import get_logger
 from proxy_manager import (
+    CircuitOpenError,
     ClientNotFoundError,
+    RotateCooldownError,
     build_tls_proxy_link,
     create_secret,
     delete_secret,
+    get_circuit_state,
     list_clients,
     mask_secret,
     rotate_secret,
 )
 import runtime
 from tariffs import Tariff, get_tariff
+from tls_domains import get_picker
+
+
+logger = get_logger(__name__)
 
 
 router = Router()
@@ -186,11 +192,9 @@ def client_id_for(telegram_id: int) -> str:
     return f"tg_{telegram_id}"
 
 
-def ensure_secret(client_id: str, preferred_secret: str | None = None) -> str:
-    users = list_clients()
-    if client_id in users:
-        return users[client_id]
-    return create_secret(client_id, preferred_secret)
+async def ensure_secret(client_id: str, preferred_secret: str | None = None) -> str:
+    """`create_secret` is already idempotent — returns existing secret if any."""
+    return await create_secret(client_id, preferred_secret)
 
 
 def subscription_link(secret: str) -> str:
@@ -239,7 +243,7 @@ async def grant_access(telegram_id: int, tariff: Tariff, action: str) -> dict:
         action = "extend" if latest else "issue"
 
     if action == "issue":
-        secret = ensure_secret(client_id)
+        secret = await ensure_secret(client_id)
         return await create_subscription(
             settings.database_path,
             telegram_id,
@@ -251,7 +255,7 @@ async def grant_access(telegram_id: int, tariff: Tariff, action: str) -> dict:
 
     if action == "extend":
         previous_secret = latest["secret"] if latest and latest["secret"] else None
-        secret = ensure_secret(client_id, previous_secret)
+        secret = await ensure_secret(client_id, previous_secret)
         if latest and latest["status"] == ACTIVE_STATUS:
             base = max(from_db_datetime(latest["expires_at"]), now)
         else:
@@ -367,17 +371,21 @@ async def admin_reply_to_client(message: Message, bot: Bot) -> None:
             )
             return
 
-        logging.info("admin reply resolved client_id=%s reply_to=%s", client_id, reply_id)
+        logger.info(
+            "event=admin_reply_resolved",
+            client_id=client_id,
+            reply_to=reply_id,
+        )
         await bot.copy_message(
             chat_id=client_id,
             from_chat_id=message.chat.id,
             message_id=message.message_id,
         )
     except TelegramForbiddenError:
-        logging.exception("Client blocked bot while relaying support reply")
+        logger.exception("event=admin_reply_client_blocked")
         await message.answer("❌ Клиент заблокировал бота")
     except Exception:
-        logging.exception("Failed to relay admin support reply to client")
+        logger.exception("event=admin_reply_relay_failed")
 
 
 @router.message(Command("admin"))
@@ -447,7 +455,7 @@ async def reboot_confirm(callback: CallbackQuery, bot: Bot) -> None:
         await message.edit_text(
             "🔁 Перезагрузка запущена.\n\n"
             "Бот вернётся через ~30 секунд. Если через минуту бот не отвечает — "
-            "проверьте на VPS: mtp → пункт 20 (установка watcher)."
+            "проверьте на VPS: mtp → пункт 22 (установка watcher)."
         )
     RESTART_REQUEST_PATH.parent.mkdir(parents=True, exist_ok=True)
     RESTART_REQUEST_PATH.write_text(datetime.now(UTC).isoformat())
@@ -460,10 +468,10 @@ async def reboot_confirm(callback: CallbackQuery, bot: Bot) -> None:
                 await bot.send_message(
                     callback.from_user.id,
                     "⚠️ Watcher автоперезагрузки не отвечает.\n\n"
-                    "Установите его один раз на VPS: mtp → пункт 20.",
+                    "Установите его один раз на VPS: mtp → пункт 22.",
                 )
             except Exception:
-                logging.exception("Failed to notify admin about missing watcher")
+                logger.exception("event=watcher_notify_failed")
 
     asyncio.create_task(check_watcher())
 
@@ -493,11 +501,11 @@ async def system_status(message: Message) -> None:
     else:
         support_line = "⚠️ ни разу не запускался"
 
-    proxy_ok = await _check_proxy("mtproto", settings.proxy_port)
+    proxy_ok = await _check_proxy("mtproto", 443)
     proxy_line = (
-        f"✅ работает на порту {settings.proxy_port}"
+        f"✅ работает (публичный адрес {settings.server_host}:{settings.proxy_port})"
         if proxy_ok
-        else f"❌ не отвечает на порту {settings.proxy_port}"
+        else "❌ не отвечает на внутреннем порту 443"
     )
 
     if WATCHER_HEARTBEAT.exists():
@@ -512,16 +520,43 @@ async def system_status(message: Message) -> None:
     else:
         watcher_line = (
             "⚠️ не установлен — кнопка «Перезагрузка системы» работать не будет.\n"
-            "   Откройте на VPS: mtp → пункт 20"
+            "   Откройте на VPS: mtp → пункт 22"
         )
 
     stats = await get_stats(settings.database_path)
 
     try:
-        keys_count = len(list_clients())
+        keys_count = len(await list_clients())
     except Exception:
         keys_count = -1
     keys_line = f"{keys_count}" if keys_count >= 0 else "недоступно"
+
+    cb_state = get_circuit_state()
+    cb_line = {
+        "closed": "✅ closed (норма)",
+        "half_open": "🟡 half_open (тестовый запрос)",
+        "open": "❌ open (TeleMT не отвечает)",
+        "unknown": "⚪ не инициализирован",
+    }.get(cb_state, cb_state)
+
+    picker = get_picker()
+    ranked = picker.snapshot()
+    if ranked:
+        picker_lines = []
+        for stats_dom in picker.ranked():
+            latency = (
+                f"{stats_dom.last_latency_ms:.0f} мс"
+                if stats_dom.last_latency_ms is not None
+                else "—"
+            )
+            mark = "✅" if stats_dom.last_ok else "❌"
+            picker_lines.append(
+                f"   {mark} {stats_dom.domain} · {latency} · "
+                f"успех {int(stats_dom.success_rate * 100)}%"
+            )
+        tls_block = "\n".join(picker_lines)
+    else:
+        tls_block = "   (ещё не пробованы)"
 
     try:
         usage = shutil.disk_usage("/app/data")
@@ -541,13 +576,16 @@ async def system_status(message: Message) -> None:
         f"🤖 Главный бот: {bot_up}\n"
         f"💬 Бот поддержки: {support_line}\n"
         f"🛰 MTProto-прокси: {proxy_line}\n"
-        f"🛡 Авто-перезагрузка (watcher): {watcher_line}\n\n"
+        f"🛡 Авто-перезагрузка (watcher): {watcher_line}\n"
+        f"⚡ TeleMT circuit breaker: {cb_line}\n\n"
         "<b>📊 Клиенты и подписки</b>\n"
         f"   👥 Всего клиентов: {stats['total_users']}\n"
         f"   ✅ Активных подписок: {stats['active']}\n"
         f"   ⏰ Истекших: {stats['expired']}\n"
         f"   🚫 Отключённых: {stats['disabled']}\n"
         f"   🔑 Ключей в proxy-конфиге: {keys_line}\n\n"
+        "<b>🌐 TLS-домены (маскировка)</b>\n"
+        f"{tls_block}\n\n"
         f"💾 Диск VPS: {disk_line}\n"
         f"🧠 Память VPS: {mem_line}\n"
         f"📡 Адрес сервера: {settings.server_host}:{settings.proxy_port}\n\n"
@@ -691,7 +729,7 @@ async def admin_card_rotate(callback: CallbackQuery, bot: Bot) -> None:
         return
 
     try:
-        secret = rotate_secret(client_id_for(telegram_id))
+        secret = await rotate_secret(client_id_for(telegram_id))
         subscription = await update_latest_subscription_secret_by_telegram_id(
             settings.database_path,
             telegram_id,
@@ -702,8 +740,20 @@ async def admin_card_rotate(callback: CallbackQuery, bot: Bot) -> None:
     except ClientNotFoundError:
         await callback.answer("Ключ не найден в proxy config.", show_alert=True)
         return
+    except RotateCooldownError as exc:
+        await callback.answer(
+            f"Слишком частая ротация. Подождите {int(exc.retry_after) + 1} сек.",
+            show_alert=True,
+        )
+        return
+    except CircuitOpenError:
+        await callback.answer(
+            "TeleMT временно недоступен, попробуйте через минуту.",
+            show_alert=True,
+        )
+        return
     except Exception as exc:
-        logging.exception("Failed to rotate secret from card for telegram_id=%s", telegram_id)
+        logger.exception("event=admin_rotate_failed", telegram_id=telegram_id)
         if message is not None and hasattr(message, "answer"):
             await message.answer(
                 "Не удалось обновить ключ. Старый ключ мог остаться активным.\n\n"
@@ -726,7 +776,11 @@ async def admin_card_rotate(callback: CallbackQuery, bot: Bot) -> None:
             reply_markup=connect_keyboard(link),
         )
     except Exception as exc:
-        logging.warning("Failed to notify rotated user %s: %s", telegram_id, exc)
+        logger.warning(
+            "event=notify_rotated_failed",
+            telegram_id=telegram_id,
+            error=str(exc),
+        )
 
     if message is not None and hasattr(message, "answer"):
         await message.answer(
@@ -759,14 +813,11 @@ async def admin_card_disable(callback: CallbackQuery) -> None:
     )
 
     try:
-        delete_secret(client_id_for(telegram_id))
+        await delete_secret(client_id_for(telegram_id))
     except ClientNotFoundError:
         pass
     except Exception as exc:
-        logging.exception(
-            "Failed to delete secret for telegram_id=%s during card disable",
-            telegram_id,
-        )
+        logger.exception("event=admin_disable_failed", telegram_id=telegram_id)
         if message is not None and hasattr(message, "answer"):
             await message.answer(
                 "Secret не удалось удалить из proxy config. "
@@ -844,14 +895,11 @@ async def admin_card_delete_yes(callback: CallbackQuery) -> None:
 
     settings = get_settings()
     try:
-        delete_secret(client_id_for(telegram_id))
+        await delete_secret(client_id_for(telegram_id))
     except ClientNotFoundError:
         pass
     except Exception as exc:
-        logging.exception(
-            "Failed to delete secret for telegram_id=%s during full delete",
-            telegram_id,
-        )
+        logger.exception("event=admin_full_delete_failed", telegram_id=telegram_id)
         await message.answer(
             "Secret не удалось удалить из proxy config. "
             "Пользователь в БД не удалён, попробуйте повторить позже.\n\n"
@@ -1138,7 +1186,7 @@ async def rotate_user_id(message: Message, state: FSMContext, bot: Bot) -> None:
 
     client_id = client_id_for(telegram_id)
     try:
-        secret = rotate_secret(client_id)
+        secret = await rotate_secret(client_id)
         subscription = await update_latest_subscription_secret_by_telegram_id(
             settings.database_path,
             telegram_id,
@@ -1154,11 +1202,22 @@ async def rotate_user_id(message: Message, state: FSMContext, bot: Bot) -> None:
         )
         await state.clear()
         return
-    except Exception as exc:
-        logging.exception(
-            "Failed to rotate secret for telegram_id=%s",
-            telegram_id,
+    except RotateCooldownError as exc:
+        await message.answer(
+            f"Слишком частая ротация: подождите {int(exc.retry_after) + 1} сек.",
+            reply_markup=admin_menu(),
         )
+        await state.clear()
+        return
+    except CircuitOpenError:
+        await message.answer(
+            "TeleMT временно недоступен, попробуйте через минуту.",
+            reply_markup=admin_menu(),
+        )
+        await state.clear()
+        return
+    except Exception as exc:
+        logger.exception("event=admin_rotate_failed", telegram_id=telegram_id)
         await message.answer(
             "Не удалось обновить ключ. Старый ключ мог остаться активным.\n\n"
             f"Ошибка: {escape(str(exc))}",
@@ -1181,7 +1240,11 @@ async def rotate_user_id(message: Message, state: FSMContext, bot: Bot) -> None:
             reply_markup=connect_keyboard(link),
         )
     except Exception as exc:
-        logging.warning("Failed to notify rotated user %s: %s", telegram_id, exc)
+        logger.warning(
+            "event=notify_rotated_failed",
+            telegram_id=telegram_id,
+            error=str(exc),
+        )
 
     await message.answer(
         "Ключ обновлён.\n\n"
@@ -1219,13 +1282,13 @@ async def disable_user_id(message: Message, state: FSMContext) -> None:
     )
 
     try:
-        delete_secret(client_id_for(telegram_id))
+        await delete_secret(client_id_for(telegram_id))
     except ClientNotFoundError:
         pass
     except Exception as exc:
-        logging.exception(
-            "Failed to delete secret for telegram_id=%s during admin disable",
-            telegram_id,
+        logger.exception(
+            "event=admin_disable_failed",
+            telegram_id=telegram_id,
         )
         await message.answer(
             "Secret не удалось удалить из proxy config. "

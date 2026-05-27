@@ -1,8 +1,6 @@
 import asyncio
 from html import escape
-import logging
 from pathlib import Path
-import sys
 
 from aiogram import Bot, Dispatcher, F, Router
 from aiogram.client.default import DefaultBotProperties
@@ -13,9 +11,11 @@ from aiogram.types import Message
 
 from config import get_settings
 from database import init_db, record_support_bot_thread, resolve_support_bot_thread
+from logging_setup import configure_logging, get_logger
 
 
 router = Router()
+logger = get_logger(__name__)
 HEARTBEAT_PATH = Path("/app/data/heartbeats/support_bot.beat")
 
 
@@ -30,7 +30,7 @@ async def heartbeat_loop() -> None:
         try:
             HEARTBEAT_PATH.touch()
         except Exception:
-            logging.exception("support_bot heartbeat failed")
+            logger.exception("event=support_bot_heartbeat_failed")
         await asyncio.sleep(30)
 
 
@@ -64,7 +64,7 @@ async def relay_client_to_admin(message: Message) -> None:
             user.id,
         )
     except Exception:
-        logging.exception("Failed to relay message from support bot client to admin")
+        logger.exception("event=support_bot_relay_failed")
         await message.answer("Поддержка временно недоступна, попробуйте позже.")
 
 
@@ -105,17 +105,21 @@ async def relay_reply(message: Message, bot: Bot) -> None:
             )
             return
 
-        logging.info("admin reply resolved client_id=%s reply_to=%s", client_id, reply_id)
+        logger.info(
+            "event=support_admin_reply_resolved",
+            client_id=client_id,
+            reply_to=reply_id,
+        )
         await bot.copy_message(
             chat_id=client_id,
             from_chat_id=message.chat.id,
             message_id=message.message_id,
         )
     except TelegramForbiddenError:
-        logging.exception("Client blocked support bot while relaying admin reply")
+        logger.exception("event=support_admin_reply_client_blocked")
         await message.answer("❌ Клиент заблокировал бота")
     except Exception:
-        logging.exception("Failed to relay support bot admin reply to client")
+        logger.exception("event=support_admin_reply_failed")
 
 
 @router.message(F.text)
@@ -125,18 +129,14 @@ async def relay_text(message: Message) -> None:
 
 async def main() -> None:
     settings = get_settings()
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s %(levelname)s %(message)s",
-        stream=sys.stdout,
-    )
+    configure_logging(level=settings.log_level, fmt=settings.log_format)
 
     if not settings.support_bot_token:
-        logging.warning("SUPPORT_BOT_TOKEN is not set; support bot is waiting for configuration")
+        logger.warning("event=support_bot_token_unset")
         await asyncio.Event().wait()
         return
     if settings.admin_id is None:
-        logging.warning("ADMIN_ID is not set; support relay is unavailable")
+        logger.warning("event=support_bot_admin_id_unset")
 
     await init_db(settings.database_path)
     asyncio.create_task(heartbeat_loop())
@@ -148,7 +148,7 @@ async def main() -> None:
     dp.include_router(router)
 
     try:
-        logging.info("Support bot is running")
+        logger.info("event=support_bot_running")
         await dp.start_polling(bot)
     finally:
         await bot.session.close()

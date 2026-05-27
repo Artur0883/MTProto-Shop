@@ -115,36 +115,81 @@ def admin_pay_request_keyboard(telegram_id: int, days: int) -> InlineKeyboardMar
     )
 
 
-def connect_keyboard(link: str) -> InlineKeyboardMarkup:
+def connect_keyboard(link: str, *, show_alt_links: bool = True) -> InlineKeyboardMarkup:
     if link.startswith("tg://proxy?"):
         button_url = "https://t.me/proxy?" + link.split("?", 1)[1]
     else:
         button_url = link
 
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [InlineKeyboardButton(text="🔐 Подключиться к MTProto", url=button_url)],
+    rows = [
+        [InlineKeyboardButton(text="🔐 Подключиться к MTProto", url=button_url)],
+    ]
+    if show_alt_links:
+        rows.append(
             [
-                InlineKeyboardButton(text="📖 Инструкция", callback_data="client_instruction"),
                 InlineKeyboardButton(
-                    text="🆘 Не подключается?",
-                    callback_data="client_troubleshoot",
-                ),
-            ],
+                    text="🌐 Альтернативные ссылки",
+                    callback_data="client_alt_links",
+                )
+            ]
+        )
+    rows.append(
+        [
+            InlineKeyboardButton(text="📖 Инструкция", callback_data="client_instruction"),
+            InlineKeyboardButton(
+                text="🆘 Не подключается?",
+                callback_data="client_troubleshoot",
+            ),
         ]
     )
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def alt_links_keyboard(links: list[tuple[str, str]]) -> InlineKeyboardMarkup:
+    """Build a keyboard listing alternate tg://proxy links via different TLS domains."""
+    rows: list[list[InlineKeyboardButton]] = []
+    for idx, (domain, link) in enumerate(links, 1):
+        if link.startswith("tg://proxy?"):
+            url = "https://t.me/proxy?" + link.split("?", 1)[1]
+        else:
+            url = link
+        rows.append(
+            [InlineKeyboardButton(text=f"🌐 Вариант {idx}: {domain}", url=url)]
+        )
+    rows.append([InlineKeyboardButton(text=BACK_BUTTON, callback_data="client_back")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 def instructions_menu() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
-            [InlineKeyboardButton(text="📱 iPhone", callback_data="client_instr_iphone")],
-            [InlineKeyboardButton(text="🤖 Android", callback_data="client_instr_android")],
             [
                 InlineKeyboardButton(
-                    text="💻 Windows / macOS",
+                    text="📱 iPhone (iOS 17 и ниже)",
+                    callback_data="client_instr_iphone",
+                ),
+            ],
+            [
+                InlineKeyboardButton(
+                    text="📱 iPhone (iOS 18+)",
+                    callback_data="client_instr_iphone18",
+                ),
+            ],
+            [
+                InlineKeyboardButton(
+                    text="🤖 Android / Huawei",
+                    callback_data="client_instr_android",
+                ),
+            ],
+            [
+                InlineKeyboardButton(
+                    text="💻 Desktop (Win / macOS / Linux)",
                     callback_data="client_instr_desktop",
-                )
+                ),
+            ],
+            [
+                InlineKeyboardButton(text="📱 Telegram X", callback_data="client_instr_x"),
+                InlineKeyboardButton(text="🌐 Web", callback_data="client_instr_web"),
             ],
             [InlineKeyboardButton(text=BACK_BUTTON, callback_data="client_back")],
         ]

@@ -1,5 +1,4 @@
 import asyncio
-import logging
 from datetime import timedelta
 
 from aiogram import Bot
@@ -14,7 +13,11 @@ from database import (
     mark_subscription_status,
     utc_now,
 )
+from logging_setup import get_logger
 from proxy_manager import ClientNotFoundError, delete_secret
+
+
+logger = get_logger(__name__)
 
 
 CHECK_INTERVAL_SECONDS = 300
@@ -32,19 +35,17 @@ async def expire_subscriptions(bot: Bot) -> None:
         telegram_id = int(subscription["telegram_id"])
         client_id = client_id_for(telegram_id)
         try:
-            delete_secret(client_id)
-        except ClientNotFoundError as exc:
-            logging.warning(
-                "Expired secret for %s is already absent in proxy config: %s",
-                telegram_id,
-                exc,
+            await delete_secret(client_id)
+        except ClientNotFoundError:
+            logger.warning(
+                "event=expire_secret_missing",
+                telegram_id=telegram_id,
             )
         except Exception as exc:
-            logging.exception(
-                "Failed to delete expired secret for %s. "
-                "Subscription remains active for retry: %s",
-                telegram_id,
-                exc,
+            logger.exception(
+                "event=expire_secret_failed",
+                telegram_id=telegram_id,
+                error=str(exc),
             )
             continue
 
@@ -61,7 +62,11 @@ async def expire_subscriptions(bot: Bot) -> None:
                 "🔁 Чтобы продлить — нажмите /start → 🚀 Получить доступ.",
             )
         except Exception as exc:
-            logging.warning("Failed to notify expired user %s: %s", telegram_id, exc)
+            logger.warning(
+                "event=expire_notify_failed",
+                telegram_id=telegram_id,
+                error=str(exc),
+            )
 
 
 async def send_reminders(bot: Bot) -> None:
@@ -87,7 +92,11 @@ async def send_reminders(bot: Bot) -> None:
                     "Напоминание: до окончания доступа осталось около 3 дней.",
                 )
             except Exception as exc:
-                logging.warning("Failed to send 3d reminder to %s: %s", telegram_id, exc)
+                logger.warning(
+                    "event=reminder_3d_failed",
+                    telegram_id=telegram_id,
+                    error=str(exc),
+                )
             await mark_reminder_sent(settings.database_path, subscription["id"], 3)
         elif (
             remaining <= timedelta(days=1)
@@ -100,7 +109,11 @@ async def send_reminders(bot: Bot) -> None:
                     "Напоминание: до окончания доступа осталось около 1 дня.",
                 )
             except Exception as exc:
-                logging.warning("Failed to send 1d reminder to %s: %s", telegram_id, exc)
+                logger.warning(
+                    "event=reminder_1d_failed",
+                    telegram_id=telegram_id,
+                    error=str(exc),
+                )
             await mark_reminder_sent(settings.database_path, subscription["id"], 1)
 
 
@@ -113,6 +126,6 @@ async def subscription_worker(bot: Bot) -> None:
     while True:
         try:
             await check_subscriptions_once(bot)
-        except Exception as exc:
-            logging.exception("Subscription worker failed: %s", exc)
+        except Exception:
+            logger.exception("event=subscription_worker_failed")
         await asyncio.sleep(CHECK_INTERVAL_SECONDS)
