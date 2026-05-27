@@ -44,7 +44,10 @@ async def relay_client_to_admin(message: Message) -> None:
 
     try:
         username = f"@{escape(user.username)}" if user.username else "без username"
-        header_msg = await message.bot.send_message(
+        bot = message.bot
+        if bot is None:
+            raise RuntimeError("bot context unavailable for support relay")
+        header_msg = await bot.send_message(
             settings.admin_id,
             f"💬 От клиента {escape(user.full_name)} {username} · ID <code>{user.id}</code>",
         )
@@ -53,7 +56,7 @@ async def relay_client_to_admin(message: Message) -> None:
             header_msg.message_id,
             user.id,
         )
-        copied_message = await message.bot.copy_message(
+        copied_message = await bot.copy_message(
             chat_id=settings.admin_id,
             from_chat_id=message.chat.id,
             message_id=message.message_id,
@@ -95,7 +98,10 @@ async def relay_reply(message: Message, bot: Bot) -> None:
 
     try:
         settings = get_settings()
-        reply_id = message.reply_to_message.message_id
+        reply = message.reply_to_message
+        if reply is None:
+            return
+        reply_id = reply.message_id
         client_id = await resolve_support_bot_thread(settings.database_path, reply_id)
         if client_id is None:
             await message.answer(

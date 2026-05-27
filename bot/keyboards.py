@@ -165,8 +165,8 @@ def instructions_menu() -> InlineKeyboardMarkup:
         inline_keyboard=[
             [
                 InlineKeyboardButton(
-                    text="📱 iPhone (iOS 17 и ниже)",
-                    callback_data="client_instr_iphone",
+                    text="✨ Инструкция для моей платформы",
+                    callback_data="client_instr_smart",
                 ),
             ],
             [
@@ -174,8 +174,13 @@ def instructions_menu() -> InlineKeyboardMarkup:
                     text="📱 iPhone (iOS 18+)",
                     callback_data="client_instr_iphone18",
                 ),
+                InlineKeyboardButton(
+                    text="📱 iPhone (iOS 17-)",
+                    callback_data="client_instr_iphone",
+                ),
             ],
             [
+                InlineKeyboardButton(text="📱 iPad", callback_data="client_instr_ipad"),
                 InlineKeyboardButton(
                     text="🤖 Android / Huawei",
                     callback_data="client_instr_android",
@@ -183,13 +188,17 @@ def instructions_menu() -> InlineKeyboardMarkup:
             ],
             [
                 InlineKeyboardButton(
-                    text="💻 Desktop (Win / macOS / Linux)",
+                    text="🍎 macOS (native)",
+                    callback_data="client_instr_macos",
+                ),
+                InlineKeyboardButton(
+                    text="💻 Desktop (Win/Linux)",
                     callback_data="client_instr_desktop",
                 ),
             ],
             [
                 InlineKeyboardButton(text="📱 Telegram X", callback_data="client_instr_x"),
-                InlineKeyboardButton(text="🌐 Web", callback_data="client_instr_web"),
+                InlineKeyboardButton(text="🌐 Telegram Web", callback_data="client_instr_web"),
             ],
             [InlineKeyboardButton(text=BACK_BUTTON, callback_data="client_back")],
         ]

@@ -223,7 +223,9 @@ async def upsert_user(
             (telegram_id, username, full_name, now),
         )
         await db.commit()
-        return await get_user_by_telegram_id(database_path, telegram_id)
+        user = await get_user_by_telegram_id(database_path, telegram_id)
+        assert user is not None
+        return user
 
 
 async def get_user_by_telegram_id(
@@ -360,7 +362,9 @@ async def create_subscription(
         )
         await db.commit()
 
-    return await get_latest_subscription_by_telegram_id(database_path, telegram_id)
+    subscription = await get_latest_subscription_by_telegram_id(database_path, telegram_id)
+    assert subscription is not None
+    return subscription
 
 
 async def extend_subscription(
@@ -409,7 +413,9 @@ async def extend_subscription(
         )
         await db.commit()
 
-    return await get_latest_subscription_by_telegram_id(database_path, telegram_id)
+    subscription = await get_latest_subscription_by_telegram_id(database_path, telegram_id)
+    assert subscription is not None
+    return subscription
 
 
 async def mark_subscription_status(
@@ -568,39 +574,35 @@ async def mark_reminder_sent(
 async def get_stats(database_path: Path) -> dict[str, int]:
     now = to_db_datetime(utc_now())
     async with open_db(database_path) as db:
-        total_users = (
-            await (await db.execute("SELECT COUNT(*) FROM users")).fetchone()
-        )[0]
-        active = (
-            await (
-                await db.execute(
-                    "SELECT COUNT(*) FROM subscriptions WHERE status = ? AND expires_at > ?",
-                    (ACTIVE_STATUS, now),
-                )
-            ).fetchone()
-        )[0]
-        expired = (
-            await (
-                await db.execute(
-                    """
-                    SELECT COUNT(*) FROM subscriptions
-                    WHERE status = ? OR (status = ? AND expires_at <= ?)
-                    """,
-                    (EXPIRED_STATUS, ACTIVE_STATUS, now),
-                )
-            ).fetchone()
-        )[0]
-        disabled = (
-            await (
-                await db.execute(
-                    "SELECT COUNT(*) FROM subscriptions WHERE status = ?",
-                    (DISABLED_STATUS,),
-                )
-            ).fetchone()
-        )[0]
+        total_users_row = await (await db.execute("SELECT COUNT(*) FROM users")).fetchone()
+        active_row = await (
+            await db.execute(
+                "SELECT COUNT(*) FROM subscriptions WHERE status = ? AND expires_at > ?",
+                (ACTIVE_STATUS, now),
+            )
+        ).fetchone()
+        expired_row = await (
+            await db.execute(
+                """
+                SELECT COUNT(*) FROM subscriptions
+                WHERE status = ? OR (status = ? AND expires_at <= ?)
+                """,
+                (EXPIRED_STATUS, ACTIVE_STATUS, now),
+            )
+        ).fetchone()
+        disabled_row = await (
+            await db.execute(
+                "SELECT COUNT(*) FROM subscriptions WHERE status = ?",
+                (DISABLED_STATUS,),
+            )
+        ).fetchone()
+        assert total_users_row is not None
+        assert active_row is not None
+        assert expired_row is not None
+        assert disabled_row is not None
     return {
-        "total_users": total_users,
-        "active": active,
-        "expired": expired,
-        "disabled": disabled,
+        "total_users": total_users_row[0],
+        "active": active_row[0],
+        "expired": expired_row[0],
+        "disabled": disabled_row[0],
     }

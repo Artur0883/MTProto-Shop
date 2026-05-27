@@ -64,11 +64,11 @@ from proxy_manager import (
     build_alternative_links,
     build_tls_proxy_link,
     create_secret,
+    pick_primary_tls_domain,
     rotate_secret,
 )
 from rate_limit import check_action_rate, format_retry_after
 from tariffs import Tariff, get_tariff
-from tls_domains import get_picker
 
 
 router = Router()
@@ -85,8 +85,7 @@ PROXY_CLEANUP_NOTICE = (
     "iPhone (iOS 17 и ниже):\n"
     "Telegram → Настройки → Данные и память → Прокси\n\n"
     "iPhone (iOS 18+):\n"
-    "Настройки iPhone → Apps → Telegram → Прокси\n"
-    "ИЛИ Telegram → Настройки → Данные и память → Прокси\n\n"
+    "Telegram → Настройки → Данные и память → Прокси\n\n"
     "Android / Huawei:\n"
     "Telegram → Настройки → Данные и память → Прокси\n\n"
     "Windows / macOS:\n"
@@ -110,59 +109,96 @@ INSTRUCTION_TEXTS = {
         "<b>📱 iPhone (iOS 17 и ниже)</b>\n\n"
         "1. Обновите Telegram до последней версии в App Store.\n"
         "2. Нажмите «🔐 Подключиться» в этом боте.\n"
-        "3. Telegram спросит «Включить прокси?» — нажмите ВКЛЮЧИТЬ.\n"
+        "3. Telegram спросит «Включить прокси?» — нажмите <b>ВКЛЮЧИТЬ</b>.\n"
         "4. Готово. В правом верхнем углу появится значок щита 🛡.\n\n"
-        "Если ссылка не открывается — нажмите «🌐 Альтернативные ссылки» "
-        "и попробуйте другой домен TLS-маскировки."
+        "<b>Если ссылка не открывается</b>\n"
+        "• нажмите «🌐 Альтернативные ссылки» и попробуйте другой домен;\n"
+        "• удалите старые прокси: Настройки → Данные и память → Прокси;\n"
+        "• отключите другой VPN, если он включён."
     ),
     "client_instr_iphone18": (
         "<b>📱 iPhone (iOS 18 и новее)</b>\n\n"
-        "В iOS 18 раздел Прокси переехал. Если вы не видите кнопку «Прокси» "
-        "в Telegram:\n\n"
-        "1. Настройки iPhone → Apps → Telegram → Прокси.\n"
-        "2. ИЛИ откройте Telegram → Настройки → Данные и память → Прокси.\n\n"
-        "Дальше как обычно:\n"
-        "3. Нажмите «🔐 Подключиться» в этом боте.\n"
-        "4. Telegram спросит «Включить прокси?» — нажмите ВКЛЮЧИТЬ.\n"
-        "5. В правом верхнем углу появится значок щита 🛡."
+        "Используйте установленное приложение Telegram, а не браузерную версию.\n\n"
+        "1. Нажмите «🔐 Подключиться» в этом боте.\n"
+        "2. Telegram спросит «Включить прокси?» — нажмите <b>ВКЛЮЧИТЬ</b>.\n"
+        "3. В Telegram появится значок активного proxy.\n\n"
+        "<b>Проверить или удалить proxy вручную:</b>\n"
+        "Telegram → Настройки → Данные и память → Прокси.\n\n"
+        "Если подключение нестабильно, нажмите «🌐 Альтернативные ссылки» "
+        "и попробуйте следующий вариант."
+    ),
+    "client_instr_ipad": (
+        "<b>📱 iPad</b>\n\n"
+        "Действия аналогичны iPhone — Telegram на iPad использует тот же интерфейс. "
+        "Если вы на iPadOS 18+ — следуйте инструкции для iPhone (iOS 18+).\n\n"
+        "1. Откройте App Store и обновите Telegram до последней версии.\n"
+        "2. Нажмите «🔐 Подключиться» в этом боте.\n"
+        "3. Подтвердите «<b>Включить прокси</b>».\n\n"
+        "Проверить настройку можно в Telegram → Настройки → Данные и память → Прокси."
     ),
     "client_instr_android": (
         "<b>🤖 Android / Huawei (без GMS)</b>\n\n"
-        "1. Обновите Telegram из доступного вам магазина или с telegram.org.\n"
+        "1. Обновите Telegram из доступного магазина (Google Play, RuStore, "
+        "AppGallery) либо скачайте APK с telegram.org.\n"
         "2. Нажмите «🔐 Подключиться» в этом боте.\n"
-        "3. Telegram покажет настройки proxy — нажмите ВКЛЮЧИТЬ.\n"
+        "3. Telegram покажет настройки proxy — нажмите <b>ВКЛЮЧИТЬ</b>.\n"
         "4. Готово. В верхней части Telegram появится значок щита 🛡.\n\n"
-        "Google Play Services для MTProto не требуются — подключение работает "
-        "на любом Android и на Huawei без GMS.\n\n"
-        "На Android 14+: если соединение рвётся в фоне, отключите оптимизацию "
-        "батареи для Telegram (Настройки → Приложения → Telegram → Батарея → Без ограничений)."
+        "ℹ️ Google Play Services для MTProto не нужны — подключение работает "
+        "на любом Android (включая Huawei без GMS, Honor, Xiaomi HyperOS).\n\n"
+        "<b>Если соединение рвётся в фоне (Android 14+):</b>\n"
+        "Настройки → Приложения → Telegram → Батарея → <i>Без ограничений</i>.\n\n"
+        "<b>Если ссылка не открывает Telegram:</b>\n"
+        "Длинно нажмите на ссылку → Скопировать → откройте Telegram → "
+        "Настройки → Данные и память → Прокси → <i>Добавить прокси</i>."
     ),
     "client_instr_desktop": (
-        "<b>💻 Windows / macOS / Linux</b>\n\n"
-        "1. Обновите Telegram Desktop до последней версии.\n"
+        "<b>💻 Telegram Desktop (Windows / Linux)</b>\n\n"
+        "1. Обновите Telegram Desktop с <code>telegram.org</code>.\n"
         "2. Нажмите «🔐 Подключиться» в этом боте.\n"
         "3. Telegram Desktop откроет окно proxy — подтвердите подключение.\n"
-        "4. Готово. В приложении появится значок щита 🛡.\n\n"
-        "Если кнопка не открывает Telegram автоматически — скопируйте ссылку "
-        "из меню «🌐 Альтернативные ссылки» и вставьте в браузер."
+        "4. В нижнем-левом углу появится значок щита 🛡.\n\n"
+        "<b>Ручной путь:</b>\n"
+        "Настройки → Продвинутые настройки → Тип соединения → "
+        "<i>Использовать proxy</i> → MTProto.\n\n"
+        "Если кнопка не открывает Telegram — скопируйте ссылку из «🌐 Альтернативные "
+        "ссылки», в Telegram Desktop нажмите Ctrl+V в любом чате, потом нажмите "
+        "на сообщение со ссылкой."
+    ),
+    "client_instr_macos": (
+        "<b>🍎 Telegram macOS (native)</b>\n\n"
+        "На macOS есть две версии Telegram — обе работают:\n\n"
+        "<b>Native Telegram для macOS</b> (из App Store):\n"
+        "1. Обновите до последней версии в App Store.\n"
+        "2. Нажмите «🔐 Подключиться» в этом боте.\n"
+        "3. Подтвердите «<b>Включить прокси</b>».\n"
+        "4. Готово. Значок щита 🛡 появится в верхнем-правом углу окна.\n\n"
+        "<b>Telegram Desktop</b> (с telegram.org):\n"
+        "Действия как для Windows/Linux — см. инструкцию «💻 Desktop».\n\n"
+        "Если соединение нестабильно, отключите другой VPN/proxy и попробуйте "
+        "вариант из «🌐 Альтернативные ссылки»."
     ),
     "client_instr_x": (
         "<b>📱 Telegram X</b>\n\n"
-        "Нажмите «🔐 Подключиться» и подтвердите proxy, если приложение покажет "
-        "такой диалог.\n\n"
-        "Telegram X в 2026 году поддерживается ограниченно. Если соединение "
-        "нестабильно — используйте официальный Telegram (он также бесплатный "
-        "и обновляется чаще)."
+        "1. Нажмите «🔐 Подключиться» в этом боте.\n"
+        "2. Telegram X покажет диалог proxy — подтвердите.\n"
+        "3. Готово.\n\n"
+        "Если приложение не принимает ссылку или соединение нестабильно, "
+        "попробуйте официальный Telegram и выберите альтернативную ссылку."
     ),
     "client_instr_web": (
         "<b>🌐 Telegram Web</b>\n\n"
-        "⚠️ Веб-версия Telegram <b>не поддерживает MTProto proxy</b>.\n\n"
-        "Откройте эту же кнопку «🔐 Подключиться» в установленном Telegram:\n"
-        "• iPhone — из App Store\n"
-        "• Android — Google Play / RuStore / telegram.org\n"
-        "• Windows / macOS / Linux — Telegram Desktop с telegram.org\n\n"
-        "Для веб-версии MTProto proxy в принципе не нужен — она использует "
-        "обычные HTTPS-соединения и блокируется/не блокируется по другим правилам."
+        "Ссылка <code>tg://proxy</code> подключает MTProto proxy в приложениях "
+        "Telegram. В <code>web.telegram.org</code> такую ссылку применить нельзя.\n\n"
+        "<b>Что делать:</b>\n"
+        "1. Откройте этого бота в установленном приложении Telegram.\n"
+        "2. Нажмите «🔐 Подключиться» и подтвердите включение proxy.\n\n"
+        "<b>Где установить приложение:</b>\n"
+        "• iPhone / iPad — App Store\n"
+        "• Android — Google Play / RuStore / AppGallery / APK с telegram.org\n"
+        "• Windows / Linux — Telegram Desktop с telegram.org\n"
+        "• macOS — App Store (native) или telegram.org (Desktop)\n\n"
+        "Если необходимо пользоваться именно браузером, MTProto-ссылка из бота "
+        "на соединение Telegram Web не влияет."
     ),
 }
 SALES_DISABLED_TEXT = (
@@ -190,23 +226,14 @@ def client_id_for(telegram_id: int) -> str:
     return f"tg_{telegram_id}"
 
 
-def primary_tls_domain() -> str:
-    """Best-known TLS domain at this moment, falling back to settings if no probe yet."""
-    settings = get_settings()
-    picker = get_picker()
-    try:
-        return picker.pick_best() or settings.tls_domain
-    except Exception:
-        return settings.tls_domain
-
-
 def build_primary_link(secret: str) -> str:
+    """Build the primary tg://proxy link using the picker-selected best TLS domain."""
     settings = get_settings()
     return build_tls_proxy_link(
         settings.server_host,
         settings.proxy_port,
         secret,
-        primary_tls_domain(),
+        pick_primary_tls_domain(),
     )
 
 
@@ -360,9 +387,16 @@ async def send_support_request(
     if settings.admin_id and user:
         username = f"@{user.username}" if user.username else "не указан"
         full_name = user.full_name or "не указано"
+        bot = message.bot
+        if bot is None:
+            await message.answer(
+                "Поддержка временно недоступна, попробуйте позже",
+                reply_markup=client_menu(),
+            )
+            return
 
         try:
-            await message.bot.send_message(
+            await bot.send_message(
                 settings.admin_id,
                 "<b>💬 Новое обращение в поддержку</b>\n\n"
                 f"👤 Клиент: {escape(full_name)}\n"
@@ -488,6 +522,7 @@ async def try_free_inline(callback: CallbackQuery) -> None:
     if message is None or not hasattr(message, "answer"):
         await callback.answer("Откройте меню командой /start.", show_alert=True)
         return
+    assert isinstance(message, Message)
 
     granted = await grant_free_trial(message, user)
     if granted is None:
@@ -505,6 +540,7 @@ async def buy_access_inline(callback: CallbackQuery) -> None:
     if message is None or not hasattr(message, "answer"):
         await callback.answer("Откройте меню командой /start.", show_alert=True)
         return
+    assert isinstance(message, Message)
 
     await callback.answer()
     await show_tariffs(message)
@@ -524,6 +560,7 @@ async def support_inline(callback: CallbackQuery, state: FSMContext) -> None:
     if message is None or not hasattr(message, "answer"):
         await callback.answer("Откройте меню командой /start.", show_alert=True)
         return
+    assert isinstance(message, Message)
 
     await callback.answer()
     await send_support_request(message, state=state, user_override=callback.from_user)
@@ -541,9 +578,33 @@ async def instruction_inline(callback: CallbackQuery) -> None:
     if message is None or not hasattr(message, "answer"):
         await callback.answer("Откройте меню командой /start.", show_alert=True)
         return
+    assert isinstance(message, Message)
 
     await callback.answer()
     await message.answer("Выберите устройство:", reply_markup=instructions_menu())
+
+
+SMART_INSTRUCTION_HINT = (
+    "<b>✨ Инструкция для моей платформы</b>\n\n"
+    "Telegram не сообщает боту модель устройства или версию приложения. "
+    "Выберите вашу платформу ниже — так инструкция будет точной.\n\n"
+    "Открыли бота в браузере? Выберите <b>🌐 Web</b>: там объяснено, "
+    "как перенести подключение в приложение Telegram."
+)
+
+
+@router.callback_query(F.data == "client_instr_smart")
+async def instruction_smart(callback: CallbackQuery) -> None:
+    message = callback.message
+    if message is None or not hasattr(message, "answer"):
+        await callback.answer("Откройте меню командой /start.", show_alert=True)
+        return
+
+    await callback.answer()
+    await message.answer(
+        SMART_INSTRUCTION_HINT,
+        reply_markup=instructions_menu(),
+    )
 
 
 @router.callback_query(F.data.in_(set(INSTRUCTION_TEXTS.keys())))
@@ -597,6 +658,7 @@ async def pay_request(callback: CallbackQuery) -> None:
     if message is None or not hasattr(message, "answer"):
         await callback.answer("Откройте меню командой /start.", show_alert=True)
         return
+    assert isinstance(message, Message)
 
     parts = (callback.data or "").split(":")
     try:
@@ -633,7 +695,11 @@ async def pay_request(callback: CallbackQuery) -> None:
 
     username = f"@{user.username}" if user.username else "-"
     price_text = f"{tariff.price} ₽" if tariff.price is not None else "-"
-    await message.bot.send_message(
+    bot = message.bot
+    if bot is None:
+        await callback.answer("Оператор временно недоступен.", show_alert=True)
+        return
+    await bot.send_message(
         settings.admin_id,
         "<b>💳 Новая заявка на оплату</b>\n\n"
         f"👤 Клиент: {escape(user.full_name or '-')}\n"
@@ -667,6 +733,7 @@ async def choose_client_tariff(callback: CallbackQuery) -> None:
     if message is None or not hasattr(message, "answer"):
         await callback.answer("Откройте меню командой /start.", show_alert=True)
         return
+    assert isinstance(message, Message)
 
     parts = (callback.data or "").split(":")
     if len(parts) != 2:
@@ -792,6 +859,7 @@ async def my_link_inline(callback: CallbackQuery) -> None:
     if message is None or not hasattr(message, "answer"):
         await callback.answer("Откройте меню командой /start.", show_alert=True)
         return
+    assert isinstance(message, Message)
 
     await callback.answer()
     await send_my_link(message, callback.from_user.id)
@@ -867,15 +935,9 @@ async def send_alt_links(callback: CallbackQuery) -> None:
         await callback.answer("Сначала оформите доступ.", show_alert=True)
         return
 
-    picker = get_picker()
-    ordered = picker.pick_alternatives(n=3) or settings.fallback_tls_domains[:3]
-    secret = subscription["secret"]
-    links = [
-        (d, build_tls_proxy_link(settings.server_host, settings.proxy_port, secret, d))
-        for d in ordered
-    ]
-    if not links:
-        links = build_alternative_links(secret, max_count=3)
+    links = build_alternative_links(
+        subscription["secret"], max_count=3, prefer_picker=True
+    )
 
     text_lines = [
         "<b>🌐 Альтернативные ссылки</b>",
@@ -987,7 +1049,7 @@ async def relay_client_to_admin(message: Message, state: FSMContext) -> None:
         if settings.admin_id is None or user is None or user.id == settings.admin_id:
             await state.clear()
             return
-        if message.text.startswith("/"):
+        if (message.text or "").startswith("/"):
             await state.clear()
             await message.answer("Выберите действие в меню ниже.", reply_markup=client_menu())
             return
@@ -1003,7 +1065,10 @@ async def relay_client_to_admin(message: Message, state: FSMContext) -> None:
             return
 
         username = f"@{escape(user.username)}" if user.username else "без username"
-        header_msg = await message.bot.send_message(
+        bot = message.bot
+        if bot is None:
+            raise RuntimeError("bot context unavailable for support relay")
+        header_msg = await bot.send_message(
             settings.admin_id,
             f"💬 От клиента {escape(user.full_name)} {username} · ID <code>{user.id}</code>",
         )
@@ -1012,7 +1077,7 @@ async def relay_client_to_admin(message: Message, state: FSMContext) -> None:
             header_msg.message_id,
             user.id,
         )
-        copied_message = await message.bot.copy_message(
+        copied_message = await bot.copy_message(
             chat_id=settings.admin_id,
             from_chat_id=user.id,
             message_id=message.message_id,
@@ -1044,6 +1109,6 @@ async def relay_client_to_admin(message: Message, state: FSMContext) -> None:
 async def unknown_client_text(message: Message) -> None:
     settings = get_settings()
     user = message.from_user
-    if user is None or user.id == settings.admin_id or message.text.startswith("/"):
+    if user is None or user.id == settings.admin_id or (message.text or "").startswith("/"):
         return
     await message.answer("Выберите действие в меню ниже.", reply_markup=client_menu())

@@ -9,9 +9,11 @@ import asyncio
 import re
 import secrets
 import time
+from collections import deque
+from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlencode
+from urllib.parse import parse_qs, urlencode, urlparse
 
 from config import get_settings
 from logging_setup import get_logger
@@ -49,7 +51,9 @@ __all__ = [
     "is_available",
     "list_clients",
     "mask_secret",
+    "pick_primary_tls_domain",
     "rotate_secret",
+    "rotate_telegram_secret",
     "validate_client_id",
     "validate_secret",
 ]
@@ -104,7 +108,12 @@ def validate_secret(secret: str) -> None:
 def build_tls_proxy_link(
     server_host: str, proxy_port: int, secret: str, tls_domain: str
 ) -> str:
-    public_secret = f"ee{secret.lower()}"
+    validate_secret(secret)
+    normalized_domain = tls_domain.strip().lower().encode("idna").decode("ascii")
+    if not normalized_domain or "/" in normalized_domain or " " in normalized_domain:
+        raise ValueError("tls_domain должен быть валидным доменным именем")
+    # Fake-TLS public secret format is ee + user secret + SNI domain encoded as hex.
+    public_secret = f"ee{secret.lower()}{normalized_domain.encode('ascii').hex()}"
     params = urlencode(
         {
             "server": server_host,
@@ -115,45 +124,164 @@ def build_tls_proxy_link(
     return f"tg://proxy?{params}"
 
 
+def pick_primary_tls_domain() -> str:
+    """Best-known TLS domain via the picker; falls back to configured primary.
+
+    Safe to call from any context — never raises.
+    """
+    settings = get_settings()
+    try:
+        from tls_domains import get_picker
+
+        chosen = get_picker().pick_best()
+        if chosen:
+            return chosen
+    except Exception as exc:
+        logger.debug("event=picker_pick_failed", error=str(exc))
+    return settings.tls_domain
+
+
 def build_alternative_links(
-    secret: str, *, max_count: int = 3, preferred_domain: str | None = None
+    secret: str,
+    *,
+    max_count: int = 3,
+    preferred_domain: str | None = None,
+    prefer_picker: bool = True,
 ) -> list[tuple[str, str]]:
     """Return ordered (domain, link) pairs across all known TLS domains.
 
-    `preferred_domain`, if provided and valid, is placed first.
+    Ordering:
+      1. `preferred_domain` (if given and valid) is placed first.
+      2. Else if `prefer_picker=True`, picker's ranking is used.
+      3. Else configured order from `settings.fallback_tls_domains`.
+
+    The result always contains at least one entry (the primary TLS domain),
+    even if probing has not run yet or the picker is unavailable.
     """
     settings = get_settings()
-    domains = list(settings.fallback_tls_domains)
-    if preferred_domain and preferred_domain in domains:
-        domains.remove(preferred_domain)
-        domains.insert(0, preferred_domain)
-    domains = domains[:max_count]
+    max_count = max(1, max_count)
+    configured = list(settings.fallback_tls_domains)
+    ordered: list[str] = []
+
+    if prefer_picker:
+        try:
+            from tls_domains import get_picker
+
+            ranked = get_picker().pick_alternatives(n=max(max_count, len(configured)))
+            ordered = [d for d in ranked if d in configured]
+        except Exception as exc:
+            logger.debug("event=picker_alternatives_failed", error=str(exc))
+            ordered = []
+
+    if not ordered:
+        ordered = configured
+
+    for d in configured:
+        if d not in ordered:
+            ordered.append(d)
+
+    if preferred_domain and preferred_domain in ordered:
+        ordered.remove(preferred_domain)
+        ordered.insert(0, preferred_domain)
+
+    ordered = ordered[:max_count] or [settings.tls_domain]
     return [
         (
             d,
             build_tls_proxy_link(settings.server_host, settings.proxy_port, secret, d),
         )
-        for d in domains
+        for d in ordered
     ]
 
 
-def _extract_secret(data: Any) -> str | None:
-    """Pull a 32-hex secret out of various TeleMT response shapes."""
-    if data is None:
+def _normalize_secret_str(raw: str) -> str | None:
+    """Return the private 32-hex secret from raw or public DD/EE value."""
+    s = raw.strip().lower()
+    if s.startswith(("ee", "dd")):
+        return s[2:34] if SECRET_RE.fullmatch(s[2:34]) else None
+    return s if SECRET_RE.fullmatch(s) else None
+
+
+def _iter_api_values(data: Any, *, max_nodes: int = 1024) -> Iterator[Any]:
+    """Breadth-first walk through JSON-like API data with a hard safety limit."""
+    pending: deque[Any] = deque([data])
+    visited: set[int] = set()
+    processed = 0
+    while pending and processed < max_nodes:
+        value = pending.popleft()
+        processed += 1
+        yield value
+        if isinstance(value, (dict, list, tuple)):
+            object_id = id(value)
+            if object_id in visited:
+                continue
+            visited.add(object_id)
+        if isinstance(value, dict):
+            pending.extend(value.values())
+        elif isinstance(value, (list, tuple)):
+            pending.extend(value)
+
+
+def _tls_link_secret(raw: str) -> str | None:
+    """Extract a private secret only from a valid Fake-TLS proxy URL."""
+    value = raw.strip()
+    try:
+        parsed = urlparse(value)
+    except ValueError:
         return None
-    if isinstance(data, str):
-        return data.lower() if SECRET_RE.fullmatch(data.lower()) else None
-    if isinstance(data, dict):
-        for key in ("secret", "client_secret", "password", "key"):
-            value = data.get(key)
-            if isinstance(value, str) and SECRET_RE.fullmatch(value.lower()):
-                return value.lower()
-        for nested in ("user", "data", "result", "client"):
-            nv = data.get(nested)
-            if isinstance(nv, dict):
-                found = _extract_secret(nv)
-                if found:
-                    return found
+    is_tg_link = parsed.scheme.lower() == "tg" and parsed.netloc.lower() == "proxy"
+    is_web_link = (
+        parsed.scheme.lower() == "https"
+        and parsed.netloc.lower() == "t.me"
+        and parsed.path.rstrip("/").lower() == "/proxy"
+    )
+    if not (is_tg_link or is_web_link):
+        return None
+    values = parse_qs(parsed.query).get("secret", [])
+    if not values:
+        return None
+    public_secret = values[0].strip().lower()
+    if not public_secret.startswith("ee") or len(public_secret) <= 34:
+        return None
+    domain_hex = public_secret[34:]
+    try:
+        domain = bytes.fromhex(domain_hex).decode("ascii")
+    except (ValueError, UnicodeDecodeError):
+        return None
+    if not domain or "/" in domain or " " in domain:
+        return None
+    return _normalize_secret_str(public_secret)
+
+
+def _extract_secret(data: Any) -> str | None:
+    """Pull a secret from any TeleMT envelope, including generated EE links."""
+    secret_keys = {
+        "secret",
+        "client_secret",
+        "user_secret",
+        "ee_secret",
+        "password",
+        "key",
+    }
+    for value in _iter_api_values(data):
+        if isinstance(value, dict):
+            for key, candidate in value.items():
+                if (
+                    isinstance(key, str)
+                    and key.lower() in secret_keys
+                    and isinstance(candidate, str)
+                ):
+                    normalized = _normalize_secret_str(candidate)
+                    if normalized:
+                        return normalized
+    for value in _iter_api_values(data):
+        if isinstance(value, str):
+            normalized = _normalize_secret_str(value)
+            if normalized:
+                return normalized
+            normalized = _tls_link_secret(value)
+            if normalized:
+                return normalized
     return None
 
 
@@ -234,8 +362,9 @@ async def rotate_secret(client_id: str) -> str:
 async def get_link(client_id: str) -> str:
     """Return a TLS-masked tg://proxy link for a client.
 
-    Prefers TeleMT-supplied TLS links if present; otherwise constructs the link
-    locally using the primary TLS domain.
+    The returned link is always locally rebuilt using picker order so the CLI
+    and bot use the same selected domain. If picker has no usable domain,
+    `build_alternative_links` falls back to configured `TLS_DOMAIN`.
     """
     validate_client_id(client_id)
     settings = get_settings()
@@ -245,35 +374,88 @@ async def get_link(client_id: str) -> str:
     except ClientNotFoundError:
         raise ClientNotFoundError(f"Клиент {client_id} не найден")
 
-    api_link = _extract_tls_link(resp)
-    if api_link:
-        return api_link
-
+    api_link_found = _extract_tls_link(resp) is not None
     secret = _extract_secret(resp)
+    secret_source = "api_response"
     if not secret:
         secret = await create_secret(client_id)
-    return build_tls_proxy_link(
-        settings.server_host, settings.proxy_port, secret, settings.tls_domain
+        secret_source = "create_or_existing"
+
+    pairs = build_alternative_links(secret, max_count=1, prefer_picker=True)
+    domain, link = pairs[0]
+    logger.info(
+        "event=link_built",
+        client_id=client_id,
+        link_source="local_fake_tls",
+        prefer_picker=True,
+        tls_domain=domain,
+        used_configured_fallback=domain == settings.tls_domain,
+        api_tls_link_found=api_link_found,
+        secret_source=secret_source,
+        server_host=settings.server_host,
+        proxy_port=settings.proxy_port,
     )
+    return link
 
 
 def _extract_tls_link(resp: Any) -> str | None:
-    if not isinstance(resp, dict):
-        return None
-    candidates = []
-    for root in (resp, resp.get("user")):
-        if isinstance(root, dict):
-            links = root.get("links")
-            if isinstance(links, dict):
-                candidates.append(links)
-    for links in candidates:
-        for key in ("tls", "secure"):
-            value = links.get(key)
-            if isinstance(value, list) and value and isinstance(value[0], str):
-                return value[0]
-            if isinstance(value, str) and value:
-                return value
+    """Pull a validated EE link from nested envelopes and `links.tls_domains`."""
+    for value in _iter_api_values(resp):
+        if isinstance(value, str) and _tls_link_secret(value):
+            return value.strip()
     return None
+
+
+async def rotate_telegram_secret(telegram_id: int) -> str:
+    """Rotate `tg_<telegram_id>` and sync the new secret into SQLite.
+
+    Wraps `rotate_secret` with a DB-level update of the latest subscription
+    (`update_latest_subscription_secret_by_telegram_id`) and a rotated-at
+    timestamp (`mark_secret_rotated`). Designed for CLI use from manage.sh
+    menu item 10 — keeps SQLite consistent when an admin manually rotates a
+    key outside the bot flow.
+
+    Raises:
+        ClientNotFoundError: when no such TeleMT user exists.
+        TeleMTError: on transport / 5xx after retries.
+    """
+    if not isinstance(telegram_id, int) or telegram_id <= 0:
+        raise ValueError("telegram_id должен быть положительным целым")
+
+    settings = get_settings()
+    client_id = f"tg_{telegram_id}"
+
+    new_secret = await rotate_secret(client_id)
+
+    try:
+        from database import (
+            mark_secret_rotated,
+            update_latest_subscription_secret_by_telegram_id,
+        )
+
+        updated = await update_latest_subscription_secret_by_telegram_id(
+            settings.database_path, telegram_id, new_secret
+        )
+        if updated is not None:
+            await mark_secret_rotated(settings.database_path, telegram_id)
+            logger.info(
+                "event=telegram_secret_rotated",
+                telegram_id=telegram_id,
+                db_synced=True,
+            )
+        else:
+            logger.warning(
+                "event=telegram_secret_rotated_no_db_record",
+                telegram_id=telegram_id,
+            )
+    except Exception as exc:
+        logger.error(
+            "event=telegram_secret_db_sync_failed",
+            telegram_id=telegram_id,
+            error=str(exc),
+        )
+
+    return new_secret
 
 
 async def list_clients() -> dict[str, str]:
@@ -332,6 +514,12 @@ async def _cli_main() -> int:
         p = subparsers.add_parser(cmd, help=f"Команда {cmd}")
         p.add_argument("client_id")
 
+    p = subparsers.add_parser(
+        "rotate-telegram",
+        help="Обновить ключ клиента по Telegram ID + синхронизировать SQLite",
+    )
+    p.add_argument("telegram_id", type=int)
+
     subparsers.add_parser("list", help="Список клиентов")
 
     args = parser.parse_args()
@@ -348,6 +536,12 @@ async def _cli_main() -> int:
             secret = await rotate_secret(args.client_id)
             print(await get_link(args.client_id))
             print(f"Обновлён {args.client_id}: {mask_secret(secret)}")
+        elif args.command == "rotate-telegram":
+            secret = await rotate_telegram_secret(args.telegram_id)
+            print(await get_link(f"tg_{args.telegram_id}"))
+            print(
+                f"Обновлён tg_{args.telegram_id}: {mask_secret(secret)} (SQLite синхронизирован)"
+            )
         elif args.command == "link":
             print(await get_link(args.client_id))
         elif args.command == "list":

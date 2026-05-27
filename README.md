@@ -21,9 +21,11 @@ MTProto-Shop использует TLS-маскировку (`tls_emulation = tru
 выглядит как обычный HTTPS до выбранного домена. Это блокируется только если РКН
 заблокирует конкретный домен у конкретного оператора. Чтобы это не выводило весь сервис из строя:
 
-1. **Несколько fallback-доменов.** В `.env` укажите `TLS_DOMAINS=a.com,b.com,c.com` —
-   бот сгенерирует резервные ссылки и предложит их клиенту через кнопку
-   **🌐 Альтернативные ссылки**.
+1. **Несколько fallback-доменов.** Укажите список в `.env` как
+   `TLS_DOMAINS=a.com,b.com,c.com` и тот же набор в
+   `telemt/config.toml` как `tls_domains = ["a.com", "b.com", "c.com"]`.
+   TeleMT сможет принять эти Fake-TLS домены, а бот предложит ссылки через
+   кнопку **🌐 Альтернативные ссылки**.
 2. **Авто-ранжирование.** Бот периодически (каждые 5 минут) делает реальный TLS handshake
    до каждого домена и сортирует их по latency + success rate. Лучший домен
    используется в основной ссылке.
@@ -37,7 +39,7 @@ MTProto-Shop использует TLS-маскировку (`tls_emulation = tru
   российский сайт (`www.kp.ru`, `www.lenta.ru`), третий — нейтральный международный.
 - Избегайте доменов, заведомо популярных у других публичных MTProto-сервисов
   (они быстрее попадают в чёрные списки DPI).
-- Проверяйте список доступности через `mtp → 25` (см. `PLAN-payment-tls-menu.md`).
+- Проверяйте кандидатов через `mtp` → `25`.
 - В `/admin → 🛡 Состояние системы` бот показывает текущий рейтинг доменов с latency.
 
 ## Тарифы
@@ -210,6 +212,9 @@ mtp
 
 Пункт 25 также позволяет проверить TLS handshake набора доменов-кандидатов непосредственно с VPS. Это предварительная диагностика, а не гарантия доступности из конкретной мобильной сети клиента.
 
+Пункт 23 выполняет smoke-тест TeleMT API через временного клиента
+`__shop_install_check__` и удаляет его после проверки, включая сценарий ошибки.
+
 ## Клиентские кнопки
 
 - 🚀 Получить доступ
@@ -219,7 +224,17 @@ mtp
 
 Клиент пишет `/start` один раз: после этого Telegram сохраняет нижнее меню, и повторно вводить команду для обычных действий не требуется. Ранее показанные клиентские кнопки также продолжают обрабатываться, чтобы не ломать уже открытое меню в Telegram.
 
-В инструкции подключения доступны отдельные подсказки для iPhone, Android/Huawei, Windows/macOS/Linux Desktop, Telegram X и Telegram Web. Telegram Bot API не сообщает боту достоверную платформу клиента, поэтому выбор инструкции остаётся явным.
+В инструкции подключения доступны отдельные подсказки для:
+
+- 📱 iPhone (iOS 17 и ниже) и iPhone (iOS 18+);
+- 📱 iPad;
+- 🤖 Android (Google Play / RuStore / APK) и Huawei/Honor без GMS, плюс заметка про HyperOS и Android 14+ battery;
+- 🍎 macOS native (App Store);
+- 💻 Telegram Desktop (Windows / Linux);
+- 📱 Telegram X;
+- 🌐 Telegram Web (с пояснением, что ссылку `tg://proxy` нужно открыть в приложении).
+
+Кнопка **✨ Инструкция для моей платформы** сразу предлагает выбрать устройство. Telegram Bot API не сообщает боту достоверную платформу клиента, поэтому бот не угадывает её автоматически.
 
 ## Сценарий нового клиента
 
@@ -262,7 +277,7 @@ mtp
 
 После смены `SERVER_HOST` или `TLS_DOMAIN` активным клиентам нужно открыть **🔑 Мои ключи** и подключить новую ссылку.
 
-Одна установка TeleMT использует один текущий `TLS_DOMAIN` и один `SERVER_HOST`. Настоящие альтернативные ссылки требуют второго проверенного endpoint или отдельной конфигурации; выдавать fallback без TLS проект намеренно не предлагает, так как это снижает устойчивость к DPI.
+Одна установка TeleMT использует один `SERVER_HOST`, основной `TLS_DOMAIN` и при необходимости список `tls_domains`. Для альтернативных ссылок список должен совпадать в `.env` (`TLS_DOMAINS`) и в секции `[censorship]` файла `telemt/config.toml` (`tls_domains`). Бот ранжирует эти домены по TLS handshake каждые 5 минут и кодирует выбранный домен в `ee`-ссылке. Plain MTProto (`dd...`) без TLS-маскировки проект намеренно не отдаёт как fallback.
 
 ## Админские функции
 
@@ -291,37 +306,61 @@ mtp
 docker compose ps
 ```
 
-Логи бота:
+Логи бота / TeleMT / бота поддержки:
 
 ```bash
 docker compose logs -f --tail=120 bot
-```
-
-Логи отдельного бота поддержки:
-
-```bash
+docker compose logs -f --tail=120 mtproto
 docker compose logs -f --tail=120 support_bot
 ```
 
-Логи proxy:
-
-```bash
-docker compose logs -f --tail=120 mtproto
-```
-
-Пересоздать оба контейнера:
+Пересоздать все контейнеры:
 
 ```bash
 docker compose up -d --build --force-recreate bot support_bot mtproto
 ```
 
-Обновить ключ клиента по Telegram ID и синхронизировать SQLite:
+Для альтернативных Fake-TLS ссылок значения должны быть синхронизированы:
 
-```bash
-docker compose exec bot python proxy_manager.py rotate-telegram 123456789
+```env
+# .env
+TLS_DOMAINS=www.cloudflare.com,www.bing.com
 ```
 
-Проверить TeleMT API после изменения ключей:
+```toml
+# telemt/config.toml, секция [censorship]
+tls_domains = ["www.cloudflare.com", "www.bing.com"]
+```
+
+После ручного изменения этих значений примените конфигурацию:
+
+```bash
+docker compose up -d --build --force-recreate mtproto bot support_bot
+```
+
+CLI ключами через `proxy_manager.py` (внутри `bot`-контейнера, идёт через TeleMT HTTP API):
+
+```bash
+# Создать ключ (идемпотентно — возвращает существующий секрет)
+docker compose exec bot python proxy_manager.py create tg_123456789
+
+# Показать tg://proxy ссылку (с лучшим TLS-доменом из picker)
+docker compose exec bot python proxy_manager.py link tg_123456789
+
+# Обновить ключ клиента (только TeleMT)
+docker compose exec bot python proxy_manager.py rotate tg_123456789
+
+# Обновить ключ клиента по Telegram ID + синхронизировать SQLite (как в меню → 10)
+docker compose exec bot python proxy_manager.py rotate-telegram 123456789
+
+# Удалить ключ
+docker compose exec bot python proxy_manager.py delete tg_123456789
+
+# Список всех ключей
+docker compose exec bot python proxy_manager.py list
+```
+
+Проверить TeleMT API напрямую:
 
 ```bash
 docker compose exec bot python -c "import urllib.request,json; print(json.loads(urllib.request.urlopen('http://mtproto:9091/v1/users',timeout=3).read()))"

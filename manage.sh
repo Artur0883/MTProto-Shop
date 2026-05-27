@@ -116,6 +116,26 @@ get_env_value() {
   sed -n "s/^${key}=//p" .env | tail -n 1
 }
 
+format_tls_domains_toml() {
+  local raw primary domain separator="" rendered=""
+  local -a domains=()
+  raw="$(get_env_value TLS_DOMAINS)"
+  primary="$(get_env_value TLS_DOMAIN)"
+  IFS=',' read -r -a domains <<< "$raw"
+  for domain in "${domains[@]}"; do
+    domain="${domain#"${domain%%[![:space:]]*}"}"
+    domain="${domain%"${domain##*[![:space:]]}"}"
+    [[ -n "$domain" && "$domain" != "$primary" ]] || continue
+    if [[ ! "$domain" =~ ^[A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?$ ]]; then
+      echo -e "${RED}Некорректный домен в TLS_DOMAINS: ${domain}.${NC}" >&2
+      return 1
+    fi
+    rendered+="${separator}\"${domain}\""
+    separator=", "
+  done
+  printf '%s' "$rendered"
+}
+
 set_env_value() {
   local key="$1" value="$2" count tmp
   [[ -f .env ]] || { echo -e "${RED}.env не найден.${NC}"; return 1; }
@@ -401,6 +421,7 @@ ADMIN_ID=${WIZARD_ADMIN_ID}
 SERVER_HOST=${WIZARD_SERVER_HOST}
 PROXY_PORT=${WIZARD_PROXY_PORT}
 TLS_DOMAIN=${WIZARD_TLS_DOMAIN}
+TLS_DOMAINS=
 
 PROXY_CORE=telemt
 TELEMT_API_URL=http://mtproto:9091
@@ -422,7 +443,7 @@ write_telemt_config() {
     echo -e "${RED}Не найден шаблон telemt/config.example.toml.${NC}"
     return 1
   fi
-  local secret server_host proxy_port tls_domain
+  local secret server_host proxy_port tls_domain tls_domains
   server_host="$(get_env_value SERVER_HOST)"
   proxy_port="$(get_env_value PROXY_PORT)"
   tls_domain="$(get_env_value TLS_DOMAIN)"
@@ -430,11 +451,13 @@ write_telemt_config() {
     echo -e "${RED}В .env должны быть заполнены SERVER_HOST, PROXY_PORT и TLS_DOMAIN.${NC}"
     return 1
   fi
+  tls_domains="$(format_tls_domains_toml)" || return 1
   secret="$(openssl rand -hex 16)"
   sed \
     -e "s|__SERVER_HOST__|${server_host}|g" \
     -e "s|__PROXY_PORT__|${proxy_port}|g" \
     -e "s|__TLS_DOMAIN__|${tls_domain}|g" \
+    -e "s|__TLS_DOMAINS__|${tls_domains}|g" \
     -e "s|__SHOP_BOOTSTRAP_SECRET__|${secret}|g" \
     telemt/config.example.toml > telemt/config.toml
   chown 65532:65532 telemt telemt/config.toml
@@ -1019,6 +1042,34 @@ backup_now() {
   echo "Бэкап создан: $archive"
 }
 
+cleanup_install_smoke_client() {
+  $COMPOSE_CMD exec -T bot python proxy_manager.py delete "__shop_install_check__" \
+    >/dev/null 2>&1 || true
+}
+
+run_smoke_test_with_cleanup() {
+  # Create-link-delete smoke for TeleMT API. Cleanup always runs via RETURN trap.
+  # Usage: run_smoke_test_with_cleanup ERRORS_ARRAY_NAME
+  local -n _errors_ref="$1"
+  local smoke_client="__shop_install_check__"
+
+  # Clear a stale prior probe, then make cleanup unavoidable on any function return.
+  cleanup_install_smoke_client
+  trap 'cleanup_install_smoke_client' RETURN
+
+  if ! $COMPOSE_CMD exec -T bot python proxy_manager.py create "$smoke_client" \
+    >/dev/null 2>&1; then
+    _errors_ref+=("Smoke-тест create через TeleMT API не прошёл.")
+    return 0
+  fi
+  if ! $COMPOSE_CMD exec -T bot python proxy_manager.py link "$smoke_client" \
+    >/dev/null 2>&1; then
+    _errors_ref+=("TeleMT API создаёт пользователей, но link не возвращается.")
+  fi
+  cleanup_install_smoke_client
+  trap - RETURN
+}
+
 check_installation() {
   local token admin_id server_host proxy_port tls_domain proxy_core support_token
   local telemt_api_url telemt_system_user
@@ -1087,6 +1138,17 @@ check_installation() {
       "import urllib.request; urllib.request.urlopen('http://mtproto:9091/v1/users', timeout=3).read()" \
       >/dev/null 2>&1; then
       errors+=("TeleMT API недоступен из контейнера mtproto-shop-bot.")
+    fi
+    if container_is_running "mtproto-shop-bot" && [[ -f telemt/config.toml ]]; then
+      if ! $COMPOSE_CMD exec -T bot python -c \
+        "import tomllib,sys; tomllib.loads(sys.stdin.read())" \
+        < telemt/config.toml >/dev/null 2>&1; then
+        errors+=("telemt/config.toml не парсится как TOML.")
+      fi
+    fi
+    if container_is_running "mtproto-shop-bot" \
+      && container_is_running "mtproto-shop-proxy"; then
+      run_smoke_test_with_cleanup errors
     fi
   fi
   if [[ "${proxy_port:-}" =~ ^[0-9]+$ ]] && ! is_port_listening "$proxy_port"; then

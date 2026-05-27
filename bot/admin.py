@@ -331,10 +331,8 @@ async def edit_user_card(
     text = render_user_card(user, subscription)
     keyboard = user_card_keyboard(telegram_id, has_active_subscription(subscription))
 
-    if message is not None and hasattr(message, "edit_text"):
+    if isinstance(message, Message):
         await message.edit_text(text, reply_markup=keyboard)
-    elif message is not None and hasattr(message, "answer"):
-        await message.answer(text, reply_markup=keyboard)
     if answer_callback:
         await callback.answer()
 
@@ -361,7 +359,10 @@ async def admin_reply_to_client(message: Message, bot: Bot) -> None:
 
     try:
         settings = get_settings()
-        reply_id = message.reply_to_message.message_id
+        reply = message.reply_to_message
+        if reply is None:
+            return
+        reply_id = reply.message_id
         client_id = await resolve_support_thread(settings.database_path, reply_id)
         if client_id is None:
             await message.answer(
@@ -435,8 +436,9 @@ async def reboot_cancel(callback: CallbackQuery) -> None:
     if callback.from_user is None or not is_admin(callback.from_user.id):
         await callback.answer("Доступ запрещён.", show_alert=True)
         return
-    if callback.message and hasattr(callback.message, "edit_text"):
-        await callback.message.edit_text("Отменено.")
+    message = callback.message
+    if isinstance(message, Message):
+        await message.edit_text("Отменено.")
     await callback.answer()
 
 
@@ -451,7 +453,7 @@ async def reboot_confirm(callback: CallbackQuery, bot: Bot) -> None:
         if age < RESTART_COOLDOWN_SEC:
             await callback.answer("⏳ Уже идёт перезагрузка, подождите.", show_alert=True)
             return
-    if message and hasattr(message, "edit_text"):
+    if isinstance(message, Message):
         await message.edit_text(
             "🔁 Перезагрузка запущена.\n\n"
             "Бот вернётся через ~30 секунд. Если через минуту бот не отвечает — "
@@ -634,6 +636,7 @@ async def users_back(callback: CallbackQuery) -> None:
             show_alert=True,
         )
         return
+    assert isinstance(message, Message)
 
     settings = get_settings()
     rows = await get_recent_users(settings.database_path, limit=10)
@@ -847,7 +850,7 @@ async def admin_card_delete(callback: CallbackQuery) -> None:
         return
 
     message = callback.message
-    if message is None or not hasattr(message, "edit_text"):
+    if not isinstance(message, Message):
         await callback.answer(
             "Сообщение устарело. Откройте карточку заново.",
             show_alert=True,
@@ -1119,10 +1122,8 @@ async def approve_payment_request(callback: CallbackQuery, bot: Bot) -> None:
         f"Срок до: {expires_at_text}\n\n"
         "✅ Ключ применится автоматически в течение ~5 секунд."
     )
-    if message is not None and hasattr(message, "edit_text"):
+    if isinstance(message, Message):
         await message.edit_text(admin_text)
-    elif message is not None and hasattr(message, "answer"):
-        await message.answer(admin_text, reply_markup=admin_menu())
     await callback.answer("Доступ выдан")
 
 
@@ -1146,10 +1147,8 @@ async def reject_payment_request(callback: CallbackQuery, bot: Bot) -> None:
         reply_markup=client_menu(),
     )
 
-    if message is not None and hasattr(message, "edit_text"):
+    if isinstance(message, Message):
         await message.edit_text("❌ Заявка отклонена")
-    elif message is not None and hasattr(message, "answer"):
-        await message.answer("❌ Заявка отклонена", reply_markup=admin_menu())
     await callback.answer("Заявка отклонена")
 
 

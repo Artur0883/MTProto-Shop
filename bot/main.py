@@ -57,11 +57,28 @@ class UserRateLimitMiddleware(BaseMiddleware):
 
 
 async def wait_for_telemt(attempts: int = 30, delay: float = 2.0) -> None:
-    """Wait for TeleMT to come up at startup. Does not block forever."""
+    """Wait for TeleMT to come up at startup. Does not block forever.
+
+    Logs `event=telemt_wait` every 5 attempts with elapsed seconds so that
+    `mtp → 4) 📄 Логи бота` shows a clear diagnostic if TeleMT is slow or
+    permanently down.
+    """
+    started = time.monotonic()
     for attempt in range(attempts):
         if await is_available():
-            logger.info("event=telemt_ready", attempts=attempt + 1)
+            logger.info(
+                "event=telemt_ready",
+                attempts=attempt + 1,
+                elapsed_seconds=round(time.monotonic() - started, 1),
+            )
             return
+        if attempt > 0 and attempt % 5 == 0:
+            logger.warning(
+                "event=telemt_wait",
+                attempts_so_far=attempt,
+                elapsed_seconds=round(time.monotonic() - started, 1),
+                remaining_attempts=attempts - attempt,
+            )
         await asyncio.sleep(delay)
     raise RuntimeError(
         f"TeleMT API still not responding after {attempts * delay:.0f}s"

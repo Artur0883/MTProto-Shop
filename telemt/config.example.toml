@@ -26,6 +26,7 @@ ip = "0.0.0.0"
 
 [censorship]
 tls_domain = "__TLS_DOMAIN__"
+tls_domains = [__TLS_DOMAINS__]
 mask = true
 tls_emulation = true
 tls_front_dir = "tlsfront"
