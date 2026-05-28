@@ -1,5 +1,5 @@
 [general]
-use_middle_proxy = true
+use_middle_proxy = false
 log_level = "normal"
 
 [general.modes]

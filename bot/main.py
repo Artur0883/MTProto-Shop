@@ -7,6 +7,7 @@ from aiogram import BaseMiddleware, Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
 from aiogram.types import CallbackQuery, Message, TelegramObject
+import aiohttp
 
 from admin import router as admin_router
 from client import router as client_router
@@ -15,6 +16,7 @@ from database import init_db
 from logging_setup import configure_logging, get_logger
 import runtime
 from subscriptions import subscription_worker
+from self_heal import self_heal_loop
 from telemt_client import close_telemt, is_available
 from tls_domains import get_picker
 
@@ -111,62 +113,94 @@ async def main() -> None:
     worker_task: asyncio.Task | None = None
     heartbeat_task: asyncio.Task | None = None
     telemt_monitor_task: asyncio.Task | None = None
+    self_heal_task: asyncio.Task | None = None
     picker = get_picker()
+
+    async def healthcheck_ping() -> None:
+        """Optional external dead-man's-switch (e.g. healthchecks.io).
+
+        Pinged on each successful heartbeat. If the whole VPS or Docker dies,
+        the external monitor stops receiving pings and alerts. No-op when unset.
+        """
+        if not settings.healthcheck_ping_url:
+            return
+        try:
+            async with aiohttp.ClientSession() as session:
+                await asyncio.wait_for(
+                    session.get(settings.healthcheck_ping_url), timeout=10
+                )
+        except Exception:
+            logger.warning("event=healthcheck_ping_failed")
 
     async def bot_heartbeat_loop() -> None:
         beat_path = settings.database_path.parent / "heartbeats" / "bot.beat"
         beat_path.parent.mkdir(parents=True, exist_ok=True)
         while True:
             try:
+                # Probe Telegram for real: proves the token, network and bot
+                # session are alive — not just that the event loop is running.
+                # A stalled poller no longer keeps the healthcheck green.
+                await asyncio.wait_for(bot.get_me(), timeout=10)
                 beat_path.touch()
+                await healthcheck_ping()
             except Exception:
-                logger.warning("event=bot_heartbeat_write_failed")
+                # Brief Telegram blip: skip the beat. The 90s healthcheck
+                # window tolerates a couple of misses; sustained failure goes
+                # stale -> unhealthy -> autoheal restarts the container.
+                logger.warning("event=bot_heartbeat_probe_failed")
             await asyncio.sleep(30)
 
     async def telemt_monitor_loop() -> None:
         failed_since: float | None = None
         notified = False
         while True:
-            available = await is_available()
-            now = time.monotonic()
-            if available:
-                if notified and settings.admin_id is not None:
-                    try:
-                        await bot.send_message(
-                            settings.admin_id,
-                            "✅ TeleMT API снова доступен.",
-                        )
-                    except Exception:
-                        logger.exception("event=telemt_recovery_notification_failed")
-                    logger.info("event=telemt_api_recovered")
-                failed_since = None
-                notified = False
-            else:
-                if failed_since is None:
-                    failed_since = now
-                if (
-                    not notified
-                    and now - failed_since >= 30
-                    and settings.admin_id is not None
-                ):
-                    try:
-                        await bot.send_message(
-                            settings.admin_id,
-                            "❌ TeleMT API не отвечает более 30 секунд. "
-                            "Проверьте VPS: mtp → 3 (статус) и mtp → 5 (логи TeleMT).",
-                        )
-                    except Exception:
-                        logger.exception("event=telemt_outage_notification_failed")
-                    logger.error("event=telemt_api_unavailable", duration_seconds=30)
-                    notified = True
+            try:
+                available = await is_available()
+                now = time.monotonic()
+                if available:
+                    if notified and settings.admin_id is not None:
+                        try:
+                            await bot.send_message(
+                                settings.admin_id,
+                                "✅ TeleMT API снова доступен.",
+                            )
+                        except Exception:
+                            logger.exception("event=telemt_recovery_notification_failed")
+                        logger.info("event=telemt_api_recovered")
+                    failed_since = None
+                    notified = False
+                else:
+                    if failed_since is None:
+                        failed_since = now
+                    if (
+                        not notified
+                        and now - failed_since >= 30
+                        and settings.admin_id is not None
+                    ):
+                        try:
+                            await bot.send_message(
+                                settings.admin_id,
+                                "❌ TeleMT API не отвечает более 30 секунд. "
+                                "Проверьте VPS: mtp → 3 (статус) и mtp → 5 (логи TeleMT).",
+                            )
+                        except Exception:
+                            logger.exception("event=telemt_outage_notification_failed")
+                        logger.error("event=telemt_api_unavailable", duration_seconds=30)
+                        notified = True
+            except Exception:
+                # Never let an unexpected error kill the monitor — that would
+                # silently stop all TeleMT outage alerts to the admin.
+                logger.exception("event=telemt_monitor_loop_error")
             await asyncio.sleep(10)
 
     async def on_startup() -> None:
-        nonlocal heartbeat_task, telemt_monitor_task, worker_task
+        nonlocal heartbeat_task, telemt_monitor_task, worker_task, self_heal_task
         runtime.STARTED_AT = datetime.now(UTC)
         worker_task = asyncio.create_task(subscription_worker(bot))
         heartbeat_task = asyncio.create_task(bot_heartbeat_loop())
         telemt_monitor_task = asyncio.create_task(telemt_monitor_loop())
+        if settings.self_heal_enabled:
+            self_heal_task = asyncio.create_task(self_heal_loop(bot))
         picker.start()
         # Probe immediately so the first user request already has rankings.
         asyncio.create_task(picker.probe_all())
@@ -178,7 +212,7 @@ async def main() -> None:
         )
 
     async def on_shutdown() -> None:
-        for task in (worker_task, heartbeat_task, telemt_monitor_task):
+        for task in (worker_task, heartbeat_task, telemt_monitor_task, self_heal_task):
             if task is not None:
                 task.cancel()
                 try:

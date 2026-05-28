@@ -241,6 +241,8 @@ async def grant_access(telegram_id: int, tariff: Tariff, action: str) -> dict:
 
     if action == "auto":
         action = "extend" if latest else "issue"
+    if action == "issue" and has_active_subscription(latest):
+        action = "extend"
 
     if action == "issue":
         secret = await ensure_secret(client_id)
@@ -542,9 +544,14 @@ async def system_status(message: Message) -> None:
     }.get(cb_state, cb_state)
 
     picker = get_picker()
+    active_primary = picker.active_primary
+    if active_primary:
+        active_line = f"   🔀 Активный домен: {active_primary} (авто-переключён)"
+    else:
+        active_line = f"   📌 Активный домен: {settings.tls_domain} (основной)"
     ranked = picker.snapshot()
     if ranked:
-        picker_lines = []
+        picker_lines = [active_line]
         for stats_dom in picker.ranked():
             latency = (
                 f"{stats_dom.last_latency_ms:.0f} мс"
@@ -558,7 +565,7 @@ async def system_status(message: Message) -> None:
             )
         tls_block = "\n".join(picker_lines)
     else:
-        tls_block = "   (ещё не пробованы)"
+        tls_block = active_line + "\n   (ещё не пробованы)"
 
     try:
         usage = shutil.disk_usage("/app/data")

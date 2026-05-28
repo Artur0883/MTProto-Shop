@@ -49,10 +49,10 @@ class Settings(BaseSettings):
     proxy_port: int = Field(default=443, ge=1, le=65535)
 
     # --- TLS-маскировка (DPI bypass) ---
-    tls_domain: str = Field(default="petrovich.ru", description="Primary TLS domain")
+    tls_domain: str = Field(default="www.microsoft.com", description="Primary TLS domain")
     tls_domains: str = Field(
         default="",
-        description="CSV of fallback TLS domains, e.g. 'www.cloudflare.com,www.bing.com'",
+        description="CSV of fallback TLS domains, e.g. 'www.cloudflare.com,www.apple.com,www.bing.com'",
     )
 
     # --- TeleMT API ---
@@ -87,6 +87,20 @@ class Settings(BaseSettings):
     log_format: Literal["json", "console"] = Field(
         default="json", description="json for production, console for dev"
     )
+    healthcheck_ping_url: str = Field(
+        default="",
+        description=(
+            "Optional external dead-man's-switch URL (e.g. healthchecks.io). "
+            "Pinged on each successful heartbeat; alerts if the whole VPS dies. "
+            "Inert when empty."
+        ),
+    )
+
+    # --- Self-heal ---
+    self_heal_enabled: bool = Field(default=True)
+    self_heal_check_interval: float = Field(default=120.0, gt=0)
+    self_heal_switch_cooldown: float = Field(default=600.0, ge=0)
+    self_heal_max_switches_per_day: int = Field(default=6, ge=0)
 
     @field_validator("admin_id", mode="before")
     @classmethod
@@ -98,7 +112,14 @@ class Settings(BaseSettings):
             return None
         return int(s)
 
-    @field_validator("bot_token", "support_bot_token", "support_contact", "server_host", mode="before")
+    @field_validator(
+        "bot_token",
+        "support_bot_token",
+        "support_contact",
+        "server_host",
+        "healthcheck_ping_url",
+        mode="before",
+    )
     @classmethod
     def _strip_str(cls, v):
         return v.strip() if isinstance(v, str) else v

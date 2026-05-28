@@ -1,750 +1,658 @@
-# PLAN.md — MTProto Telegram Shop
+# PLAN.md — Полный перевод MTProto-Shop на TeleMT
 
-> Это точный план реализации. Codex должен работать строго по нему.
-> Архитектуру сверх этого плана менять нельзя.
-
----
-
-## 1. Цель проекта
-
-Простой проект для VPS, который ставится одной командой и запускает:
-
-- MTProto proxy (движок: **mtprotoproxy / alexbers**);
-- Telegram-бота для клиентов;
-- Web Admin Cabinet для владельца (работа с компьютера);
-- SQLite-базу для пользователей, подписок и оплат;
-- автоматическое отключение просроченных подписок;
-- (на Этапе 2) напоминания клиентам перед окончанием доступа.
-
-Главная цель: владелец VPS один раз запускает `install.sh`, вводит токен бота и свои данные — после чего система сама установилась и работает 24/7.
+> **Назначение:** инструкции Codex для миграции проекта на TeleMT как единственное рабочее ядро proxy.
+> **Код этим PLAN.md не пишется.** Codex должен реализовать пункты ниже строго по списку файлов и функций.
+> Не делать рефакторинг "заодно", не менять архитектуру/Prisma/маршруты бота сверх описанного.
 
 ---
 
-## 2. Главная схема работы
+## A. Цель
 
-```text
-Клиент открывает Telegram-бота
-        ↓
-Нажимает «Купить доступ» → выбирает тариф
-        ↓
-На первом этапе админ вручную подтверждает оплату
-(через Telegram-бота или через Web Admin Cabinet)
-        ↓
-Бот создаёт клиенту личный secret
-        ↓
-Клиент получает личную MTProto-ссылку
-        ↓
-Бот считает срок подписки
-        ↓
-После окончания срока доступ отключается автоматически
-(secret удаляется из proxy)
+Полностью перевести MTProto-Shop на **TeleMT**:
+
+- единственное ядро proxy — TeleMT;
+- alexbers удалён из runtime установки и меню (исторические упоминания в README допустимы);
+- проект ставится одной командой `bash <(curl -fsSL https://raw.githubusercontent.com/Artur0883/MTProto-Shop/main/install.sh)` и после пункта 1 у клиента в Telegram появляется рабочая `tg://proxy?...` ссылка с `ee`-секретом;
+- TeleMT поднимается внутри `docker compose` как сервис `mtproto` (без отдельного systemd-юнита);
+- bot управляет ключами через TeleMT HTTP API внутри docker-сети.
+
+## B. Критерий готовности
+
+На чистом VPS после `mtp` → `1) 🧙 Первичная установка с нуля`:
+
+1. `docker compose ps` показывает: `mtproto-shop-proxy` (TeleMT) — running, `mtproto-shop-bot` — running, опционально `mtproto-shop-support-bot` — running.
+2. `docker compose exec bot curl -fsS http://mtproto:9091/v1/users` отвечает JSON-списком пользователей (минимум `shop_bootstrap`).
+3. Bot отвечает на `/start` в Telegram.
+4. Клиент после `🎁 Попробовать бесплатно` получает кнопку `🔐 Подключиться` с `tg://proxy?...secret=ee...` ссылкой.
+5. `bot/subscriptions.py.expire_subscriptions` корректно удаляет пользователя из TeleMT по окончании подписки.
+6. `mtp` → `21) 🧪 Проверка установки` возвращает success.
+
+## C. Приоритеты
+
+| Уровень | Содержимое |
+|---------|-----------|
+| P0 | docker-compose.yml, telemt/config.toml runtime, bot/proxy_manager.py (HTTP-адаптер), bot/main.py (no alexbers gate), bot/config.py (TeleMT settings), .env.example, manage.sh first_setup_wizard |
+| P1 | manage.sh меню (убрать выбор ядра, SIGUSR2, ensure_alexbers, switch_proxy_core), scripts/mtproto-restart-watcher.sh (убрать proxy.reload), backup_now |
+| P2 | удаление proxy/, deploy/docker-compose.{alexbers,telemt}.yml, README.md, .gitignore/.dockerignore чистка |
+
+---
+
+## D. Изменения по файлам
+
+### D1. `docker-compose.yml` (полностью переписать) — P0
+
+Создать с нуля. Сервис `mtproto` теперь TeleMT, остальные не меняются по контракту.
+
+```yaml
+services:
+  mtproto:
+    image: ghcr.io/telemt/telemt:latest
+    container_name: mtproto-shop-proxy
+    restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
+    env_file:
+      - .env
+    environment:
+      PROXY_PORT: ${PROXY_PORT:-443}
+      TLS_DOMAIN: ${TLS_DOMAIN:-www.cloudflare.com}
+    ports:
+      - "${PROXY_PORT:-443}:443/tcp"
+    expose:
+      - "9091"
+    volumes:
+      - ./telemt:/etc/telemt:rw
+
+  bot:
+    build:
+      context: .
+      dockerfile: bot/Dockerfile
+    container_name: mtproto-shop-bot
+    restart: unless-stopped
+    depends_on:
+      - mtproto
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
+    healthcheck:
+      test: ["CMD-SHELL", "test -f /app/data/heartbeats/bot.beat && [ $$(($$(date +%s) - $$(stat -c %Y /app/data/heartbeats/bot.beat))) -lt 90 ]"]
+      interval: 60s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+    env_file:
+      - .env
+    volumes:
+      - ./data:/app/data
+      - ./backups:/app/backups
+      - ./logs:/app/logs
+
+  support_bot:
+    build:
+      context: .
+      dockerfile: bot/Dockerfile
+    container_name: mtproto-shop-support-bot
+    restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
+    healthcheck:
+      test: ["CMD-SHELL", "[ -z \"$$SUPPORT_BOT_TOKEN\" ] || (test -f /app/data/heartbeats/support_bot.beat && [ $$(($$(date +%s) - $$(stat -c %Y /app/data/heartbeats/support_bot.beat))) -lt 90 ])"]
+      interval: 60s
+      timeout: 5s
+      retries: 3
+      start_period: 60s
+    env_file:
+      - .env
+    command: ["python", "support_bot.py"]
+    volumes:
+      - ./data:/app/data
+      - ./logs:/app/logs
 ```
 
----
+Заметки:
+- Удалить healthcheck для `mtproto` (TeleMT image не гарантирует `python3` или `nc`). Достаточно проверки через bot из main.py.
+- Удалить `PROXY_CONFIG_PATH` env у `bot` и `./proxy/config` volume.
+- Не публиковать 9091 наружу — только `expose`.
+- Том `./telemt:/etc/telemt:rw` обязательно директория, не файл.
 
-## 3. Важное правило
+### D2. `telemt/config.toml` runtime — P0
 
-Нельзя выдавать всем клиентам одну и ту же proxy-ссылку.
+Этот файл создаётся `first_setup_wizard()` в `manage.sh` при первичной установке. **Не коммитить.** Добавить шаблон `telemt/config.example.toml` в репозиторий для документации и копирования.
 
-```text
-1 клиент = 1 личный secret = 1 личная ссылка
+`telemt/config.example.toml`:
+
+```toml
+[general]
+use_middle_proxy = true
+log_level = "normal"
+
+[general.modes]
+classic = false
+secure = false
+tls = true
+
+[general.links]
+show = "*"
+public_host = "__SERVER_HOST__"
+public_port = __PROXY_PORT__
+
+[server]
+port = 443
+
+[server.api]
+enabled = true
+listen = "0.0.0.0:9091"
+whitelist = ["127.0.0.1/32", "::1/128", "10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16"]
+
+[[server.listeners]]
+ip = "0.0.0.0"
+
+[censorship]
+tls_domain = "__TLS_DOMAIN__"
+mask = true
+tls_emulation = true
+tls_front_dir = "tlsfront"
+
+[access.users]
+shop_bootstrap = "__SHOP_BOOTSTRAP_SECRET__"
 ```
 
-Так можно отключить одного клиента, не трогая остальных. **Это ядро продукта** — на этом правиле строится вся архитектура.
+`first_setup_wizard()` подставляет:
+- `__SERVER_HOST__` → `$WIZARD_SERVER_HOST`
+- `__PROXY_PORT__` → `$WIZARD_PROXY_PORT`
+- `__TLS_DOMAIN__` → `$WIZARD_TLS_DOMAIN`
+- `__SHOP_BOOTSTRAP_SECRET__` → `openssl rand -hex 16`
 
----
+### D3. `bot/config.py` — P0
 
-## 4. Proxy Engine Selection
+Добавить три поля в `Settings`:
 
-### Основной вариант (MVP): mtprotoproxy / alexbers
-
-Для MVP используется **mtprotoproxy** (автор alexbers).
-
-Почему выбран именно он:
-
-- проект работает как **магазин подписок**, где `1 клиент = 1 личный secret`;
-- mtprotoproxy штатно поддерживает **множество secret/пользователей в одном конфиге** (структура `USERS`);
-- позволяет добавлять и удалять конкретного клиента, не трогая остальных;
-- поддерживает FakeTLS (маскировка под TLS) — пригодится против блокировок;
-- запускается готовым Docker-образом, без ручной сборки.
-
-Почему **не** официальный MTProxy и **не** mtg v2:
-
-- официальный MTProxy задаёт secret через аргументы командной строки и фактически не поддерживается;
-- mtg v2 рассчитан на **один secret на инстанс** — это прямо противоречит модели «1 клиент = 1 secret».
-
-### Резервный вариант (на будущее): TeleMT
-
-TeleMT остаётся как **альтернативный вариант для будущего теста**, но:
-
-- **не используется как основной движок MVP**;
-- может быть рассмотрен только после того, как будет доказана удобная работа с множеством secret;
-- переход на TeleMT — отдельная задача за пределами MVP.
-
-### Важно про установку
-
-Пользователь **не устанавливает proxy вручную**. Всё делает `install.sh`:
-
-- mtprotoproxy поднимается как сервис в `docker-compose.yml`;
-- запускается готовым Docker-образом mtprotoproxy (точное имя образа Codex подтверждает в Milestone 0);
-- конфиг proxy лежит в `proxy/config/` и управляется ботом.
-
-### Связь «бот ↔ proxy»
-
-- **Источник правды** — база SQLite. В ней хранятся клиенты и их secret.
-- `proxy_manager.py` генерирует конфиг mtprotoproxy в `proxy/config/` из данных БД.
-- Конфиг лежит на общем Docker-томе, смонтированном и в контейнер бота (запись), и в контейнер proxy (чтение).
-- **Контейнеру бота запрещено монтировать Docker socket.** Применение изменений идёт через перечитку конфига proxy. Точный механизм применения (hot-reload конфига mtprotoproxy / сигнал процессу) Codex обязан проверить и зафиксировать в **Milestone 0** — это ключевая проверка проекта.
-
----
-
-## 5. Этапы реализации
-
-### Этап 1 — MVP без автоматической оплаты
-
-- запуск mtprotoproxy на VPS через Docker Compose;
-- Telegram-бот (aiogram 3.x);
-- SQLite-база (через `aiosqlite`);
-- ручная выдача доступа (через Telegram-бота и через Web Admin Cabinet);
-- клиентские кнопки «Моя ссылка», «Осталось дней»;
-- автоматическое отключение просроченных подписок (удаление secret);
-- Web Admin Cabinet (FastAPI + Jinja2);
-- `install.sh` для установки на чистый VPS;
-- `README.md` с простой инструкцией.
-
-Оплата на Этапе 1 — ручная: клиент оплатил, админ выдал доступ.
-
-### Этап 2 — Автоматизация подписок
-
-- напоминание за 3 дня до окончания;
-- напоминание за 1 день до окончания;
-- журнал действий;
-- автоматический backup базы по расписанию.
-
-### Этап 3 — Telegram Stars
-
-- оплата через Telegram Stars;
-- автоматическая выдача доступа после успешной оплаты;
-- история платежей;
-- продление подписки кнопкой.
-
-### Этап 4 — Улучшения
-
-- QR-код для подключения;
-- инструкции для iPhone / Android / Windows / macOS;
-- промокоды;
-- реферальная система;
-- статистика продаж;
-- рассылка клиентам.
-
----
-
-## 6. Milestone 0 — проверка proxy-ядра
-
-**Это первый и обязательный шаг. Без прохождения Milestone 0 разработку бота не начинать.**
-
-Цель — доказать, что выбранный движок (mtprotoproxy) реально пригоден для модели «1 клиент = 1 secret».
-
-Milestone 0 считается пройденным, если подтверждено:
-
-- [ ] proxy запускается через `docker compose up -d`;
-- [ ] создаётся один secret;
-- [ ] собирается рабочая ссылка `tg://proxy?...` или `https://t.me/proxy?...`;
-- [ ] ссылка реально подключается в Telegram;
-- [ ] secret удаляется из конфига;
-- [ ] после удаления доступ по этой ссылке реально пропадает;
-- [ ] в конфиге одновременно может быть много secret для разных клиентов;
-- [ ] **добавление/удаление secret применяется без рестарта всего стека и без монтирования Docker socket в контейнер бота** (зафиксировать точный механизм применения изменений).
-
-Если последний пункт не выполняется штатными средствами mtprotoproxy — Codex обязан остановиться, описать проблему и предложить варианты решения **до** начала разработки бота. Здесь же оценивается, нужен ли резервный вариант (TeleMT).
-
----
-
-## 7. Структура проекта
-
-```text
-mtproto-shop/
-├── install.sh
-├── docker-compose.yml
-├── .env.example
-├── .gitignore
-├── .dockerignore
-├── README.md
-├── PLAN.md
-├── bot/
-│   ├── Dockerfile
-│   ├── requirements.txt
-│   ├── main.py
-│   ├── config.py
-│   ├── database.py
-│   ├── proxy_manager.py
-│   ├── client.py
-│   ├── admin.py
-│   ├── subscriptions.py
-│   ├── web.py
-│   ├── keyboards.py
-│   ├── tariffs.py
-│   └── templates/
-│       └── (Jinja2-шаблоны Web Admin Cabinet)
-├── proxy/
-│   └── config/
-│       └── (конфиг mtprotoproxy, генерируется автоматически)
-├── data/
-│   └── .gitkeep
-├── backups/
-│   └── .gitkeep
-└── scripts/
-    ├── backup.sh
-    ├── update.sh
-    └── logs.sh
+```python
+proxy_core: str          # всегда "telemt"
+telemt_api_url: str      # http://mtproto:9091
+telemt_system_user: str  # shop_bootstrap
 ```
 
----
+В `get_settings()`:
 
-## 8. Обязательные файлы проекта
+```python
+proxy_core=os.getenv("PROXY_CORE", "telemt").strip().lower() or "telemt",
+telemt_api_url=os.getenv("TELEMT_API_URL", "http://mtproto:9091").strip().rstrip("/"),
+telemt_system_user=os.getenv("TELEMT_SYSTEM_USER", "shop_bootstrap").strip() or "shop_bootstrap",
+```
 
-Codex обязан создать как минимум следующие файлы:
+**Удалить** `proxy_config_path` из `Settings` и из `get_settings()` (больше нигде не используется после миграции).
 
-**Корень проекта**
+### D4. `bot/proxy_manager.py` (полностью переписать) — P0
 
-- `install.sh`
-- `docker-compose.yml`
-- `.env.example`
-- `.gitignore`
-- `.dockerignore`
-- `README.md`
+Сохранить внешний интерфейс:
 
-**Бот**
+```python
+class ClientNotFoundError(ValueError): ...
 
-- `bot/Dockerfile`
-- `bot/requirements.txt`
-- `bot/main.py`
-- `bot/config.py`
-- `bot/database.py`
-- `bot/proxy_manager.py`
-- `bot/client.py`
-- `bot/admin.py`
-- `bot/subscriptions.py`
-- `bot/web.py`
-- `bot/keyboards.py`
-- `bot/tariffs.py`
-- `bot/templates/` — Jinja2-шаблоны для Web Admin Cabinet
+def mask_secret(secret: str) -> str
+def generate_secret() -> str  # 32 hex
+def validate_client_id(client_id: str) -> None
+def validate_secret(secret: str) -> None
+def build_tls_proxy_link(server_host, proxy_port, secret, tls_domain) -> str
+def build_proxy_link(server_host, proxy_port, secret) -> str  # можно оставить, не критично
 
-**Скрипты**
+def create_secret(client_id: str, provided_secret: str | None = None) -> str
+def delete_secret(client_id: str) -> str
+def rotate_secret(client_id: str) -> str
+def get_link(client_id: str) -> str
+def list_clients() -> dict[str, str]
 
-- `scripts/backup.sh`
-- `scripts/update.sh`
-- `scripts/logs.sh`
+async def rotate_telegram_secret(telegram_id: int) -> str   # остаётся, использует rotate_secret + DB
+def main() -> int                                            # CLI
+```
 
-**Папки с данными** (создаёт `install.sh`, в репозитории — `.gitkeep`)
+**Удалить:**
+- `SUPPORTED_PROXY_CORE`
+- `require_supported_proxy_core()`
+- `ensure_runtime_config()`, `get_example_config_path()`, `set_runtime_config_permissions()`
+- `load_users()`, `write_config()`, `request_proxy_reload()`
+- `import runpy`, `import shutil`, `import tempfile` (если больше не нужны)
+- print-строки `apply changes: docker compose kill -s SIGUSR2 mtproto` в `main()` CLI — заменить на `apply changes via TeleMT API` (или просто убрать).
 
-- `data/`
-- `backups/`
-- `proxy/config/`
+**HTTP-клиент:** использовать `urllib.request` из stdlib, **не добавлять** `httpx`/`aiohttp` в requirements.
 
----
+Реализация (псевдо-схема, Codex детализирует):
 
-## 9. Что делает каждый файл
+```python
+import json
+import urllib.error
+import urllib.request
+from config import get_settings
 
-### `install.sh`
-Главный установщик для VPS. См. раздел 10.
+DEFAULT_TIMEOUT = 5.0
 
-### `docker-compose.yml`
-Поднимает сервисы:
-- `mtproto` — proxy-сервер mtprotoproxy (готовый образ), порт `PROXY_PORT`, том `./proxy/config` на чтение;
-- `bot` — Telegram-бот + Web Admin Cabinet (один образ, один процесс), порт `WEB_PORT`, тома `./data`, `./backups`, `./proxy/config` на запись.
+def _api_request(method: str, path: str, body: dict | None = None) -> dict | list | None:
+    settings = get_settings()
+    url = f"{settings.telemt_api_url}{path}"
+    data = json.dumps(body).encode("utf-8") if body is not None else None
+    headers = {"Content-Type": "application/json"} if body is not None else {}
+    req = urllib.request.Request(url, data=data, method=method, headers=headers)
+    try:
+        with urllib.request.urlopen(req, timeout=DEFAULT_TIMEOUT) as resp:
+            raw = resp.read()
+            if not raw:
+                return None
+            return json.loads(raw)
+    except urllib.error.HTTPError as exc:
+        if exc.code == 404:
+            raise ClientNotFoundError(f"telemt 404 for {method} {path}")
+        raise RuntimeError(f"telemt API {method} {path} failed: {exc.code} {exc.reason}") from exc
+    except urllib.error.URLError as exc:
+        raise RuntimeError(f"telemt API {method} {path} unreachable: {exc.reason}") from exc
 
-У обоих сервисов `restart: unless-stopped`.
+def create_secret(client_id: str, provided_secret: str | None = None) -> str:
+    validate_client_id(client_id)
+    secret = (provided_secret or generate_secret()).lower()
+    validate_secret(secret)
+    # idempotent: если уже есть — вернуть его
+    try:
+        existing = _api_request("GET", f"/v1/users/{client_id}")
+        if existing:
+            current = _extract_secret(existing)
+            if current:
+                return current
+    except ClientNotFoundError:
+        pass
+    _api_request("POST", "/v1/users", {"username": client_id, "secret": secret})
+    return secret
 
-### `.env.example`
-Пример настроек без реальных секретов (см. раздел 10).
+def delete_secret(client_id: str) -> str:
+    validate_client_id(client_id)
+    settings = get_settings()
+    if client_id == settings.telemt_system_user:
+        raise ValueError(f"refusing to delete system user '{client_id}'")
+    try:
+        existing = _api_request("GET", f"/v1/users/{client_id}")
+    except ClientNotFoundError:
+        raise ClientNotFoundError(f"client '{client_id}' not found")
+    secret = _extract_secret(existing) or ""
+    try:
+        _api_request("DELETE", f"/v1/users/{client_id}")
+    except ClientNotFoundError:
+        raise ClientNotFoundError(f"client '{client_id}' not found")
+    return secret
 
-### `.gitignore`
-Запрещает попадание в Git: `.env`, базы, backup, кэш Python (см. раздел 15).
+def rotate_secret(client_id: str) -> str:
+    validate_client_id(client_id)
+    new_secret = generate_secret()
+    try:
+        resp = _api_request("POST", f"/v1/users/{client_id}/rotate-secret",
+                            {"secret": new_secret})
+    except ClientNotFoundError:
+        raise ClientNotFoundError(f"client '{client_id}' not found")
+    return _extract_secret(resp) or new_secret
 
-### `.dockerignore`
-Исключает из Docker-образа: `.env`, `data/`, `backups/`, `__pycache__/`, `.venv/`, `.git/`, `*.db`.
+def get_link(client_id: str) -> str:
+    validate_client_id(client_id)
+    settings = get_settings()
+    try:
+        resp = _api_request("GET", f"/v1/users/{client_id}")
+    except ClientNotFoundError:
+        raise ClientNotFoundError(f"client '{client_id}' not found")
+    tls_links = (((resp or {}).get("user") or resp or {}).get("links") or {}).get("tls") or []
+    if tls_links:
+        return tls_links[0]
+    secret = _extract_secret(resp) or ""
+    if not secret:
+        raise RuntimeError(f"client '{client_id}' has no secret to build link")
+    return build_tls_proxy_link(settings.server_host, settings.proxy_port, secret, settings.tls_domain)
 
-### `bot/Dockerfile`
-Образ бота: базовый `python:3.12-slim`, установка `requirements.txt`, копирование `bot/`, запуск `main.py`.
+def list_clients() -> dict[str, str]:
+    settings = get_settings()
+    resp = _api_request("GET", "/v1/users") or {}
+    users = resp.get("users") if isinstance(resp, dict) else resp
+    result: dict[str, str] = {}
+    if isinstance(users, list):
+        for entry in users:
+            name = entry.get("username") or entry.get("name")
+            if not name or name == settings.telemt_system_user:
+                continue
+            secret = _extract_secret(entry) or ""
+            result[name] = secret.lower()
+    elif isinstance(users, dict):
+        for name, entry in users.items():
+            if name == settings.telemt_system_user:
+                continue
+            if isinstance(entry, str):
+                result[name] = entry.lower()
+            else:
+                result[name] = (_extract_secret(entry) or "").lower()
+    return result
 
-### `bot/requirements.txt`
-Минимальный набор зависимостей:
-- `aiogram` (3.x);
-- `aiosqlite`;
-- `apscheduler`;
-- `fastapi`;
-- `uvicorn[standard]`;
-- `jinja2`;
-- `python-dotenv`.
+def _extract_secret(entry) -> str | None:
+    if entry is None:
+        return None
+    if isinstance(entry, str):
+        return entry
+    if isinstance(entry, dict):
+        # подобрать ключ — TeleMT может отдавать "secret", "client_secret", "user.secret" и т.п.
+        for key in ("secret", "client_secret"):
+            value = entry.get(key)
+            if isinstance(value, str):
+                return value
+        user_node = entry.get("user")
+        if isinstance(user_node, dict):
+            return _extract_secret(user_node)
+    return None
+```
 
-Лишние зависимости не добавлять.
+**Важно** для Codex:
+- если `list_clients()` от TeleMT не отдаёт `secret`, в `ensure_secret()` callsite (admin.py / client.py) при пустой строке — делать `create_secret(client_id, preferred_secret)` (как и сейчас);
+- `rotate_telegram_secret()` остаётся как сейчас, но без `require_supported_proxy_core()`;
+- CLI `main()` остаётся: команды `create`, `delete`, `rotate`, `rotate-telegram`, `link`, `list` — все используют новые функции;
+- системный пользователь `shop_bootstrap` фильтруется из `list_clients()` и блокируется в `delete_secret()`.
 
-### `bot/main.py`
-Точка запуска. В одном процессе и одном asyncio event loop запускает:
-- aiogram (polling), роутеры клиента и админа;
-- FastAPI/uvicorn (Web Admin Cabinet);
-- планировщик проверки подписок (APScheduler).
+### D5. `bot/main.py` — P0
 
-### `bot/config.py`
-Читает настройки из переменных окружения (`.env` через `python-dotenv` локально; в Docker — из окружения контейнера).
+```python
+# было:
+from proxy_manager import ensure_runtime_config, require_supported_proxy_core
+...
+require_supported_proxy_core()
+ensure_runtime_config(settings.proxy_config_path)
+```
 
-### `bot/database.py`
-Работа с SQLite через `aiosqlite`:
-- создание таблиц при старте;
-- получение/создание пользователя;
-- создание, продление, отключение подписки;
-- статистика;
-- выборки для Web Admin Cabinet.
+Заменить на:
 
-### `bot/proxy_manager.py`
-Управление secret клиентов:
-- сгенерировать новый secret;
-- сгенерировать конфиг mtprotoproxy в `proxy/config/` из данных БД (БД — источник правды);
-- применить изменения к proxy (механизм из Milestone 0);
-- собрать proxy-ссылку **на лету** из `SERVER_HOST` + `PROXY_PORT` + `secret`;
-- удалить secret.
+```python
+import time
+import urllib.request
+import urllib.error
+...
+def _wait_for_telemt(api_url: str, attempts: int = 30, delay: float = 2.0) -> None:
+    last_err: Exception | None = None
+    for _ in range(attempts):
+        try:
+            req = urllib.request.Request(f"{api_url}/v1/users", method="GET")
+            with urllib.request.urlopen(req, timeout=2.0) as resp:
+                if resp.status < 500:
+                    return
+        except Exception as exc:
+            last_err = exc
+        time.sleep(delay)
+    logging.warning("TeleMT API still not responding after %ss: %s",
+                    attempts * delay, last_err)
+...
+async def main() -> None:
+    settings = get_settings()
+    ...
+    _wait_for_telemt(settings.telemt_api_url)
+    # никакого ensure_runtime_config, никакого require_supported_proxy_core
+```
 
-### `bot/client.py`
-Клиентская часть бота: `/start`, «Купить доступ», «Моя ссылка», «Осталось дней», «Поддержка».
+Заметки:
+- Если TeleMT отдаёт `/v1/health` — допустимо использовать его. `/v1/users` работает всегда и не требует знаний о точном endpoint.
+- Логи `Proxy config path: %s` убрать; добавить `logging.info("TeleMT API: %s", settings.telemt_api_url)`.
 
-### `bot/admin.py`
-Админская часть в Telegram. Доступ только по `ADMIN_ID`:
-`/admin`, список пользователей, выдать/продлить/отключить доступ, статистика, рассылка.
+### D6. `bot/admin.py` и `bot/client.py` — P0
 
-### `bot/subscriptions.py`
-Фоновая проверка подписок:
-- найти истёкшие подписки и отключить их (удалить secret);
-- (Этап 2) напоминания за 3 и за 1 день с использованием `reminder_3d_sent` / `reminder_1d_sent`.
+Минимальные правки, интерфейс остаётся:
 
-### `bot/web.py`
-Web Admin Cabinet на FastAPI + Jinja2. См. раздел 11.
+**admin.py:**
+- константа `SIGUSR2_NOTICE` — переименовать в `PROXY_APPLY_NOTICE` и поменять текст на:
+  ```python
+  PROXY_APPLY_NOTICE = "✅ Ключ применён в TeleMT мгновенно через API."
+  ```
+  И обновить все её use-site (включая `access_disabled_text`, `admin_card_delete_yes`).
+- сообщения вида `"✅ Ключ применится автоматически в течение ~5 секунд."` оставить как пользовательский текст или укоротить (опционально).
+- `ensure_secret()` остаётся, но при пустом `secret` в `users` — он сам сделает `create_secret(client_id, preferred_secret)`. Codex не меняет логику, но проверяет, что при пустой строке вызов идёт в create.
 
-### `bot/keyboards.py`
-Inline/Reply-клавиатуры для клиентского и админского меню.
+**client.py:**
+- `ensure_secret()` — то же самое.
 
-### `bot/tariffs.py`
-Тарифы как данные: название, длительность в днях, цена, валюта (см. раздел 14).
+**Никакие маршруты, FSM, handlers, тарифы и БД-таблицы не трогать.**
 
-### `scripts/backup.sh`
-Backup базы SQLite консистентным способом (`sqlite3 .backup`, не простое копирование).
+### D7. `bot/subscriptions.py` — P0
 
-### `scripts/update.sh`
-Обновление проекта на VPS: `git pull` → `docker compose down` → `docker compose up -d --build`.
+Изменений не требуется по контракту: уже использует `delete_secret(client_id)` и `ClientNotFoundError`. После замены `proxy_manager.py` `expire_subscriptions()` автоматически работает через TeleMT API.
 
-### `scripts/logs.sh`
-Просмотр логов: `docker compose logs -f`.
+### D8. `bot/Dockerfile` — P0 (мелкая правка)
 
----
+Не требует изменений, **если** `urllib.request` достаточно. Если Codex решит использовать `httpx`, обновить `bot/requirements.txt`. **Рекомендуется stdlib.**
 
-## 10. One-click VPS Installation
-
-`install.sh` — единственная команда установки. Запускается из склонированной папки проекта.
-
-### Что устанавливает install.sh
-
-- проверяет, что ОС — Ubuntu;
-- устанавливает **Docker**;
-- устанавливает **Docker Compose plugin**;
-- устанавливает **Git**;
-- устанавливает **SQLite tools** (`sqlite3` — нужен для backup);
-- устанавливает и настраивает **UFW** (firewall, см. раздел 16);
-- создаёт папки `data/`, `backups/`, `proxy/config/`;
-- создаёт начальный валидный конфиг mtprotoproxy в `proxy/config/`;
-- спрашивает у пользователя данные и создаёт `.env`;
-- поднимает весь стек через `docker compose up -d` — это запускает **mtprotoproxy**, **Telegram-бота** и **Web Admin Cabinet**;
-- включает **автозапуск после перезагрузки** (`systemctl enable docker` + `restart: unless-stopped` в compose);
-- показывает статус контейнеров и команды для проверки.
-
-### Данные, которые спрашивает install.sh
-
-Записываются в `.env`:
+### D9. `.env.example` — P0
 
 ```env
-BOT_TOKEN=put_your_bot_token_here
-ADMIN_ID=123456789
-SERVER_HOST=your_server_ip_or_domain
+BOT_TOKEN=
+SUPPORT_BOT_TOKEN=
+ADMIN_ID=
+
+SERVER_HOST=
 PROXY_PORT=443
-WEB_PORT=8080
+TLS_DOMAIN=www.cloudflare.com
+
+PROXY_CORE=telemt
+TELEMT_API_URL=http://mtproto:9091
+TELEMT_SYSTEM_USER=shop_bootstrap
+
+SUPPORT_CONTACT=
 DATABASE_PATH=/app/data/shop.db
-ADMIN_WEB_USERNAME=admin
-ADMIN_WEB_PASSWORD=change_me_strong_password
+
+PAYMENT_MODE=manual
+DEV_AUTO_ISSUE=false
 ```
 
-### Требования к безопасности install.sh
+Удалить `TELEMT_CONFIG_PATH` (не нужен боту).
 
-- **не затирать существующий `.env`** — если файл есть, переиспользовать его или предложить оставить;
-- **не удалять базу** и содержимое `data/`;
-- **безопасен при повторном запуске** (идемпотентность): повторный прогон не ломает рабочую установку и не теряет данные.
+### D10. `manage.sh` — P0 / P1
 
----
+**Меню (P0):** заменить блок `while true` на новые пункты (см. ниже). Удалить пункт `21) 🧩 Выбор / смена ядра proxy`. Текущий пункт `22) 🧪 Проверка установки` становится новым `21)`. Метку proxy → "Логи TeleMT".
 
-## 11. Web Admin Cabinet
-
-Web-кабинет администратора для работы с компьютера (в дополнение к админке в Telegram).
-
-### Общие правила
-
-- кабинет **только для владельца/админа**;
-- **клиенты работают через Telegram-бота**, в web-кабинет доступа не имеют;
-- стек: **FastAPI + Jinja2**;
-- **без React, Vite и сложного frontend** — серверный рендеринг HTML, минимум CSS;
-- URL: `http://SERVER_HOST:8080/admin`;
-- запускается в том же контейнере и процессе, что и бот.
-
-### Авторизация
-
-- логин и пароль берутся из `.env`:
-  - `ADMIN_WEB_USERNAME`
-  - `ADMIN_WEB_PASSWORD`
-- любой доступ к `/admin` без корректных учётных данных запрещён.
-
-> Примечание по безопасности: на Этапе 1 кабинет работает по `http` (без nginx и TLS). Поэтому пароль `ADMIN_WEB_PASSWORD` должен быть длинным и сложным. TLS/reverse-proxy — задача будущего этапа.
-
-### Что показывает кабинет
-
-- список пользователей;
-- активные подписки;
-- просроченные подписки;
-- последние оплаты;
-- статистику;
-- кнопки действий: **продлить**, **отключить**, **backup**.
-
-### Что кабинет НЕ показывает
-
-- `secret` — только частично (маскированный, например первые/последние символы);
-- `BOT_TOKEN` — не показывать никогда.
-
----
-
-## 12. База данных SQLite
-
-Доступ к базе — только через `aiosqlite`. Все даты хранить в **UTC**.
-
-### `users`
-
-```text
-id
-telegram_id
-username
-full_name
-created_at
+```
+1) 🧙 Первичная установка с нуля
+2) 🚀 Установка / обновление / запуск
+3) ✅ Статус контейнеров
+4) 📄 Логи бота
+5) 📄 Логи TeleMT
+6) 📋 Список ключей
+7) ➕ Добавить ключ вручную
+8) 🔄 Обновить ключ клиента по Telegram ID + синхронизировать SQLite
+9) 🔗 Показать ссылку по Telegram ID
+10) 🔗 Показать ссылку по client_id
+11) ❌ Удалить ключ по client_id
+12) ♻️ Проверить TeleMT API / применить изменения
+13) ⚙️ Открыть .env
+14) 💾 Сделать бэкап
+15) 🔁 Пересоздать Telegram-ботов
+16) 🔁 Пересоздать TeleMT proxy
+17) 🔁 Пересоздать ботов + TeleMT proxy
+18) 🖥️ Перезагрузить VPS полностью
+19) 📄 Логи бота поддержки
+20) 🛡 Установить watcher автоматического рестарта
+21) 🧪 Проверка установки
+0) 🚪 Выход
 ```
 
-### `subscriptions`
+**Функции `manage.sh` (изменения):**
 
-```text
-id
-user_id
-secret
-tariff_days
-starts_at
-expires_at
-status
-reminder_3d_sent
-reminder_1d_sent
-created_at
-updated_at
+| Функция | Действие |
+|---------|----------|
+| `read_proxy_core` | **Удалить**. Wizard не спрашивает выбор ядра. |
+| `prepare_compose_for_core` | **Удалить**. `docker-compose.yml` в репо уже TeleMT — копирование из `deploy/` не нужно. |
+| `ensure_alexbers_runtime_config` | **Удалить**. |
+| `switch_proxy_core` | **Удалить**. Пункт меню снят. |
+| `reload_proxy` | Переименовать в `check_telemt_api`. Делает `docker compose exec bot curl -fsS http://mtproto:9091/v1/users -o /dev/null` (или через `wget`). Печатает success/fail. Никаких SIGUSR2. |
+| `show_proxy_logs` | Сохранить, только переименовать заголовок на `Логи TeleMT`. |
+| `backup_now` | Бэкапить `telemt/` (директорию) вместо `proxy/config`. Шаблон: `tar -czf "$archive" data telemt .env docker-compose.yml 2>/dev/null \|\| true`. |
+| `check_installation` | Удалить проверку `PROXY_CORE=alexbers`; добавить проверку, что `http://mtproto:9091/v1/users` отвечает (через `docker compose exec bot`). |
+| `first_setup_wizard` | Не вызывать `read_proxy_core`. Не вызывать `prepare_compose_for_core`. Перед `start_and_verify_installation` сгенерировать `telemt/config.toml` из `telemt/config.example.toml` с подстановкой `SERVER_HOST/PROXY_PORT/TLS_DOMAIN` и `openssl rand -hex 16` для `shop_bootstrap`. |
+| `write_wizard_env` | Всегда писать `PROXY_CORE=telemt`. Добавить `TELEMT_API_URL=http://mtproto:9091` и `TELEMT_SYSTEM_USER=shop_bootstrap`. Убрать `TELEMT_CONFIG_PATH`. |
+| `start_and_verify_installation` | После `docker compose up` подождать TeleMT (loop с `docker compose exec bot curl …` 30×2с), затем проверить контейнер bot. |
+| case-роутинг меню | Обновить под новые номера пунктов; `12) check_telemt_api`, `21) check_installation`; убрать `switch_proxy_core`. |
+
+**Генерация `telemt/config.toml` в wizard (sed-подстановка):**
+
+```bash
+write_telemt_config() {
+  mkdir -p telemt
+  local secret
+  secret="$(openssl rand -hex 16)"
+  sed \
+    -e "s|__SERVER_HOST__|${WIZARD_SERVER_HOST}|g" \
+    -e "s|__PROXY_PORT__|${WIZARD_PROXY_PORT}|g" \
+    -e "s|__TLS_DOMAIN__|${WIZARD_TLS_DOMAIN}|g" \
+    -e "s|__SHOP_BOOTSTRAP_SECRET__|${secret}|g" \
+    telemt/config.example.toml > telemt/config.toml
+  chmod 600 telemt/config.toml
+}
 ```
 
-Правила:
+Вызвать `write_telemt_config` сразу после `write_wizard_env`.
 
-- **не хранить `proxy_link` в базе.** Хранить только `secret`, а ссылку собирать на лету из `SERVER_HOST` и `PROXY_PORT`;
-- `reminder_3d_sent` и `reminder_1d_sent` — флаги (0/1), чтобы не слать напоминания повторно (используются на Этапе 2, но колонки создаются сразу).
+### D11. `scripts/mtproto-restart-watcher.sh` — P1
 
-### `payments`
+Удалить блок `if [[ -f "$PROXY_SENTINEL" ]] ... fi` (SIGUSR2-перезагрузка alexbers). Остальная логика рестарта `bot/support_bot/mtproto` через `data/restart.request` остаётся.
 
-```text
-id
-user_id
-amount
-currency
-provider
-status
-created_at
+### D12. `.gitignore` — P2
+
+Текущее достаточно за исключением `proxy/config/config.py` (директория удаляется целиком). Привести к виду:
+
 ```
-
-### `settings`
-
-```text
-key
-value
-```
-
----
-
-## 13. Что должно быть в Telegram-боте
-
-Бот работает через polling (отдельный порт для бота не открывается).
-
-### Клиентское меню
-
-```text
-🚀 Купить доступ
-🔗 Моя ссылка
-📅 Осталось дней
-💬 Поддержка
-```
-
-На Этапе 1 «Купить доступ» показывает тарифы и контакт/заявку админу (оплата ручная).
-
-### Админское меню (в Telegram)
-
-```text
-👥 Пользователи
-➕ Выдать доступ
-🔁 Продлить доступ
-❌ Отключить доступ
-📊 Статистика
-📢 Рассылка
-💾 Backup
-```
-
-Доступ к админке — только по `ADMIN_ID`.
-
----
-
-## 14. Тарифы
-
-Тарифы хранятся в `bot/tariffs.py` как данные (название, дни, цена, валюта).
-
-На первом этапе:
-
-```text
-7 дней
-30 дней
-90 дней
-```
-
----
-
-## 15. Безопасность
-
-Обязательно:
-
-- **не монтировать Docker socket** в контейнер бота;
-- `.env` **не попадает в GitHub**;
-- база и backup **не попадают в GitHub**;
-- все даты хранятся в **UTC**;
-- доступ к SQLite — только через **`aiosqlite`**;
-- `install.sh` **не затирает существующий `.env`**;
-- `install.sh` **не удаляет базу**;
-- `install.sh` **безопасен при повторном запуске**;
-- админ-команды в Telegram — только для `ADMIN_ID`;
-- Web Admin Cabinet — только по `ADMIN_WEB_USERNAME` / `ADMIN_WEB_PASSWORD`;
-- `secret` в кабинете показывается частично; `BOT_TOKEN` не показывается;
-- открыты только нужные порты;
-- SSH защищён ключом или сложным паролем;
-- регулярный backup базы.
-
-### `.gitignore`
-
-```gitignore
 .env
-*.db
-*.sqlite
+.env.*
+!.env.example
 data/
 backups/
-proxy/config/
+logs/
+telemt/config.toml
+telemt/*.tmp
+*.db
+*.sqlite
+*.log
 __pycache__/
 .venv/
+
+.claude/
+```
+
+### D13. `.dockerignore` — P2
+
+То же самое: убрать `proxy/config/config.py`, добавить `telemt/config.toml`, оставить `telemt/config.example.toml` доступным (через белый список не требуется — он не *.toml.tmp). 
+
+```
+.env
+.env.*
+!.env.example
+data/
+backups/
 logs/
+.git/
+.claude/
+__pycache__/
+**/__pycache__/
+telemt/config.toml
+telemt/*.tmp
+*.db
+*.sqlite
 *.log
+node_modules/
+dist/
+server/dist/
+coverage/
 ```
 
----
+### D14. Удалить файлы / директории — P2
 
-## 16. Firewall (UFW)
-
-`install.sh` настраивает UFW. Открыть минимум:
-
-```text
-22/tcp   — SSH
-443/tcp  — MTProto proxy (PROXY_PORT)
-8080/tcp — Web Admin Cabinet (WEB_PORT)
+```
+proxy/                                    # вся директория, alexbers config
+deploy/docker-compose.alexbers.yml
+deploy/docker-compose.telemt.yml
 ```
 
-Бот работает через Telegram polling — отдельный порт для бота не открывается.
+Если `deploy/` после этого пуст — удалить и его.
+
+### D15. `install.sh` — без изменений (P2 проверка)
+
+Проверить, что:
+- Репозиторий `Artur0883/MTProto-Shop` подставлен.
+- Команда `mtp` создаётся.
+- UFW открывает 80/tcp, 443/tcp, OpenSSH.
+
+Никаких правок. Универсальный установщик, не зависит от ядра.
+
+### D16. `README.md` — P2
+
+Обновить:
+- "MTProto proxy через `alexbers/mtprotoproxy`" → "MTProto proxy через TeleMT (`ghcr.io/telemt/telemt:latest`)".
+- Блок `Переменные окружения`: убрать `PROXY_CORE=alexbers`, поставить `PROXY_CORE=telemt`, добавить `TELEMT_API_URL`, `TELEMT_SYSTEM_USER`. Удалить `TELEMT_CONFIG_PATH`.
+- Главное меню VPS: обновить новый список пунктов 1-21 (без 22, без switch_proxy_core).
+- Раздел "Ручные команды": убрать `docker compose kill -s SIGUSR2 mtproto`; заменить на `docker compose exec bot curl -fsS http://mtproto:9091/v1/users`.
+- "Быстрая установка с нуля" — оставить как есть, формулировку про "TeleMT показан в выборе ядра, но заблокирован" удалить.
+- В разделе "Важные файлы": заменить `proxy/config/config.py` на `telemt/config.toml`.
 
 ---
 
-## 17. Что НЕ делать на первом этапе
-
-Не добавлять:
-
-- публичный сайт и клиентский личный кабинет (Web Admin Cabinet — это **админский** инструмент, он включён в MVP);
-- PostgreSQL;
-- Kubernetes;
-- nginx / reverse-proxy / TLS;
-- сложный CI/CD;
-- несколько платёжных систем;
-- автоматическую оплату (Telegram Stars — Этап 3);
-- реферальную систему;
-- промокоды;
-- сложную аналитику.
-
-Сначала — рабочее ядро.
-
----
-
-## 18. Риски
-
-### Риск 1 — клиенты пересылают ссылку
-Решение: личный secret каждому клиенту; возможность отключить конкретный secret.
-
-### Риск 2 — Telegram/провайдер блокирует proxy
-Решение: использовать домен и FakeTLS; держать backup VPS; быстро менять IP/домен в настройках (ссылка собирается на лету, поэтому смена `SERVER_HOST` применяется сразу).
-
-### Риск 3 — потеря базы
-Решение: регулярный консистентный backup SQLite; хранить backup отдельно.
-
-### Риск 4 — ошибка в оплатах
-Решение: на Этапе 1 — ручная выдача; Telegram Stars — после MVP.
-
-### Риск 5 — применение изменений secret к proxy
-Главный технический риск. Бот не может рестартить контейнер proxy (Docker socket запрещён). Решение: проверить и зафиксировать механизм применения изменений в **Milestone 0** до старта основной разработки.
-
-### Риск 6 — небезопасный повторный запуск install.sh
-Решение: идемпотентный `install.sh`, который не затирает `.env` и не удаляет базу.
-
----
-
-## 19. Порядок реализации
-
-Codex реализует проект строго по этапам. Следующий этап начинать только после завершения предыдущего.
-
-1. **Milestone 0 — проверка proxy-ядра.**
-   Поднять mtprotoproxy в Docker Compose, создать secret, собрать ссылку, проверить подключение, удалить secret, подтвердить пропажу доступа, подтвердить работу с множеством secret и механизм применения изменений (раздел 6).
-   *Готово, когда:* все пункты чек-листа Milestone 0 выполнены и механизм применения зафиксирован.
-
-2. **Telegram-бот MVP.**
-   `config.py`, `database.py` (схема + операции), `proxy_manager.py`, `client.py`, `admin.py`, `keyboards.py`, `tariffs.py`, `main.py`. Ручная выдача доступа, клиентские кнопки.
-   *Готово, когда:* админ может выдать доступ, клиент получает рабочую ссылку и видит срок.
-
-3. **Автоотключение подписок.**
-   `subscriptions.py` + планировщик (APScheduler). Истёкшие подписки отключаются автоматически, secret удаляется из proxy.
-   *Готово, когда:* просроченный доступ реально пропадает без ручного вмешательства.
-
-4. **Web Admin Cabinet.**
-   `web.py` + `templates/`. Списки, статистика, кнопки продлить/отключить/backup, авторизация из `.env`.
-   *Готово, когда:* `http://SERVER_HOST:8080/admin` работает и закрыт авторизацией.
-
-5. **Polishing install.sh.**
-   Установка всех зависимостей, UFW, автозапуск, идемпотентность, защита `.env` и базы.
-   *Готово, когда:* `install.sh` ставит всё на чистый VPS и безопасен при повторном запуске.
-
-6. **README и финальная проверка.**
-   `README.md` для новичка, проверка всех команд запуска, описание как тестировать.
-   *Готово, когда:* по README новичок может развернуть проект с нуля.
-
----
-
-## 20. Минимальный готовый результат MVP
-
-MVP считается готовым, если:
-
-- `install.sh` ставит всё на чистый VPS;
-- mtprotoproxy запускается;
-- Telegram-бот запускается;
-- Web Admin Cabinet доступен и защищён авторизацией;
-- админ может выдать доступ клиенту (через Telegram или web-кабинет);
-- клиент получает личную ссылку;
-- клиент видит срок подписки;
-- просроченный доступ отключается автоматически (secret удаляется);
-- всё переживает перезагрузку VPS;
-- есть `README.md` для новичка.
-
----
-
-## 21. Команды для локальной проверки
-
-Windows:
+## E. Проверки (Codex запускает в конце)
 
 ```bash
-python -m venv .venv
-.venv\Scripts\activate
-pip install -r bot/requirements.txt
-python bot/main.py
+bash -n install.sh
+bash -n manage.sh
+python -m compileall bot
+docker compose config
+docker compose -f docker-compose.yml config
+
+# runtime-упоминаний alexbers быть не должно (README history допустим):
+grep -RIn "alexbers" --exclude-dir=.git --exclude-dir=.claude --exclude=README.md .
+grep -RIn "mtprotoproxy" --exclude-dir=.git --exclude-dir=.claude --exclude=README.md .
+grep -RIn "SUPPORTED_PROXY_CORE" bot manage.sh
+grep -RIn "SIGUSR2" bot manage.sh scripts
+grep -RIn "runpy" bot
+grep -RIn "proxy/config" bot manage.sh docker-compose.yml
 ```
 
-Linux/macOS:
+Ожидаемые результаты:
+- `bash -n` — без ошибок.
+- `python -m compileall bot` — без ошибок (нет syntax errors).
+- `docker compose config` — печатает валидный merged config; видно `image: ghcr.io/telemt/telemt:latest`.
+- `grep alexbers/mtprotoproxy` в runtime коде — **пусто**.
+- `grep SUPPORTED_PROXY_CORE/SIGUSR2/runpy/proxy/config` — **пусто** в `bot/` и `manage.sh`.
+
+После применения изменений на чистом VPS:
 
 ```bash
-python3 -m venv .venv
-source .venv/bin/activate
-pip install -r bot/requirements.txt
-python3 bot/main.py
+cd /opt/mtproto-shop && bash manage.sh   # пункт 1 → пункт 21
+docker compose ps                         # mtproto-shop-proxy/-bot running
+docker compose exec bot python -c "import urllib.request,json; print(json.loads(urllib.request.urlopen('http://mtproto:9091/v1/users',timeout=3).read()))"
+docker compose exec bot python proxy_manager.py create tg_123456
+docker compose exec bot python proxy_manager.py link   tg_123456
+docker compose exec bot python proxy_manager.py delete tg_123456
 ```
 
 ---
 
-## 22. Команды для VPS
+## F. Готовый промт для Codex
 
-```bash
-ssh root@IP_СЕРВЕРА
-apt update && apt upgrade -y
-apt install git -y
-git clone https://github.com/YOUR_USERNAME/mtproto-shop.git
-cd mtproto-shop
-sudo bash install.sh
-```
-
----
-
-## 23. Проверка на VPS
-
-```bash
-docker compose ps         # статус контейнеров
-docker compose logs -f    # логи
-docker compose restart    # перезапуск
-docker compose down       # остановить
-docker compose up -d      # запустить
-```
+> Выполни миграцию проекта `MTProto-Shop` на TeleMT строго по `PLAN.md`. Не делай правок вне списка файлов. Соблюдай порядок:
+>
+> 1. **P0:** `docker-compose.yml` (D1), `telemt/config.example.toml` (D2), `bot/config.py` (D3), `bot/proxy_manager.py` (D4 — полная замена через `urllib.request`, **без новых зависимостей**), `bot/main.py` (D5), `bot/admin.py` + `bot/client.py` (D6, только переименование `SIGUSR2_NOTICE`), `.env.example` (D9), `manage.sh` `first_setup_wizard`/`write_wizard_env`/новая `write_telemt_config`/`start_and_verify_installation`/`check_installation`/`reload_proxy→check_telemt_api`/`backup_now` (D10).
+> 2. **P1:** меню `manage.sh` (D10), `scripts/mtproto-restart-watcher.sh` (D11).
+> 3. **P2:** `.gitignore` (D12), `.dockerignore` (D13), удалить `proxy/`, `deploy/docker-compose.alexbers.yml`, `deploy/docker-compose.telemt.yml` (D14), `README.md` (D16).
+>
+> После каждой группы запускай проверки из раздела E. При расхождениях формата ответа TeleMT API (например, путь к секрету или к `links.tls`) — расширь функцию `_extract_secret` и `get_link`, остальные сигнатуры функций менять нельзя — их вызывают `bot/admin.py`, `bot/client.py`, `bot/subscriptions.py`.
+>
+> Не добавляй `httpx`/`aiohttp` в `bot/requirements.txt`. Не трогай Prisma/маршруты/тарифы/keyboards/database.py.
+>
+> Критерий готовности — раздел B `PLAN.md`.
 
 ---
 
-## 24. Промт для Codex после утверждения плана
+## G. Итог
 
-```text
-Работай строго по PLAN.md. Архитектуру сверх плана не менять.
-
-Нужно реализовать проект «MTProto Telegram Shop».
-
-ПОРЯДОК РАБОТЫ (раздел 19 PLAN.md):
-1. Сначала Milestone 0 — доказать работоспособность proxy-ядра.
-   Не начинать разработку бота, пока Milestone 0 не пройден.
-2. Telegram-бот MVP.
-3. Автоотключение подписок.
-4. Web Admin Cabinet.
-5. Polishing install.sh.
-6. README и финальная проверка.
-
-ОБЯЗАТЕЛЬНЫЕ ОГРАНИЧЕНИЯ:
-- proxy-движок MVP: mtprotoproxy / alexbers (TeleMT не использовать).
-- Не монтировать Docker socket в контейнер бота.
-- Не добавлять лишние зависимости.
-- Не хранить секреты в коде. Все реальные токены — только через .env.
-- install.sh идемпотентен: не затирает .env, не удаляет базу.
-- Все даты — в UTC.
-- SQLite — только через aiosqlite.
-- Не хранить proxy_link в базе — собирать ссылку на лету.
-- Web Admin Cabinet — FastAPI + Jinja2, без React/Vite.
-
-РЕЗУЛЬТАТ:
-- Сначала покажи список файлов, которые будешь создавать.
-- Реализуй проект по этапам.
-- После реализации дай команды:
-  1. как запустить локально;
-  2. как загрузить на GitHub;
-  3. как установить на VPS;
-  4. как проверить, что proxy, бот и Web Admin Cabinet работают.
-```
-
----
-
-## 25. Как работать с этим файлом
-
-1. Папка проекта, например: `D:\MTProto-Shop`.
-2. Этот файл сохранён как `PLAN.md` в корне проекта.
-3. Открыть папку в VS Code.
-4. Дать Codex команду из раздела 24 — начиная с **Milestone 0**.
+- Документ заменяет старый `PLAN.md` (alexbers-эра). Все runtime-упоминания alexbers удаляются.
+- TeleMT поднимается через docker compose как `mtproto`, API доступен только из docker-сети.
+- `bot/proxy_manager.py` становится тонким HTTP-адаптером поверх TeleMT API. Интерфейс функций сохранён ⇒ `admin.py`, `client.py`, `subscriptions.py` правятся минимально.
+- Wizard ставит проект на чистый VPS одной командой и пунктом 1 в меню.

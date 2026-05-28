@@ -7,6 +7,7 @@ processors so every log line — ours or third-party — gets the same format.
 from __future__ import annotations
 
 import logging
+import re
 import sys
 from typing import Any
 
@@ -71,7 +72,50 @@ def get_logger(name: str | None = None) -> structlog.stdlib.BoundLogger:
     return structlog.get_logger(name)
 
 
-_SECRET_KEYS = frozenset({"secret", "bot_token", "support_bot_token", "token", "password"})
+_SECRET_KEY_PARTS = ("secret", "token", "password", "admin_id")
+_TOKEN_RE = re.compile(r"\b\d{5,}:[A-Za-z0-9_-]{20,}\b")
+_HEX_SECRET_RE = re.compile(r"\b[0-9a-fA-F]{32}\b")
+
+
+def _mask_string(value: str) -> str:
+    masked = _TOKEN_RE.sub("***masked***", value)
+    masked = _HEX_SECRET_RE.sub("***masked***", masked)
+    return masked
+
+
+def _mask_value(value: Any) -> Any:
+    if isinstance(value, str):
+        if len(value) > 10:
+            return f"{value[:6]}...{value[-4:]}"
+        return "***"
+    if isinstance(value, int):
+        return "***"
+    if isinstance(value, dict):
+        return {
+            key: _mask_value(item) if _is_secret_key(str(key)) else _mask_nested(item)
+            for key, item in value.items()
+        }
+    if isinstance(value, list):
+        return [_mask_nested(item) for item in value]
+    return value
+
+
+def _mask_nested(value: Any) -> Any:
+    if isinstance(value, str):
+        return _mask_string(value)
+    if isinstance(value, dict):
+        return {
+            key: _mask_value(item) if _is_secret_key(str(key)) else _mask_nested(item)
+            for key, item in value.items()
+        }
+    if isinstance(value, list):
+        return [_mask_nested(item) for item in value]
+    return value
+
+
+def _is_secret_key(key: str) -> bool:
+    normalized = key.lower()
+    return any(part in normalized for part in _SECRET_KEY_PARTS)
 
 
 def _mask_secrets(_logger: Any, _name: str, event_dict: dict[str, Any]) -> dict[str, Any]:
@@ -80,9 +124,8 @@ def _mask_secrets(_logger: Any, _name: str, event_dict: dict[str, Any]) -> dict[
     Reduces the risk of leaking bot tokens or proxy secrets into logs.
     """
     for key, value in list(event_dict.items()):
-        if key in _SECRET_KEYS and isinstance(value, str) and value:
-            if len(value) > 10:
-                event_dict[key] = f"{value[:6]}...{value[-4:]}"
-            else:
-                event_dict[key] = "***"
+        if _is_secret_key(str(key)):
+            event_dict[key] = _mask_value(value)
+        else:
+            event_dict[key] = _mask_nested(value)
     return event_dict

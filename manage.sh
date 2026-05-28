@@ -17,6 +17,9 @@ RED='\033[0;31m'
 BLUE='\033[0;34m'
 NC='\033[0m'
 
+DEFAULT_TLS_DOMAIN="www.microsoft.com"
+DEFAULT_TLS_DOMAINS="www.cloudflare.com,www.apple.com,www.bing.com"
+
 pause() {
   echo
   read -r -p "Нажмите Enter, чтобы вернуться в меню..." _
@@ -137,7 +140,8 @@ format_tls_domains_toml() {
 }
 
 set_env_value() {
-  local key="$1" value="$2" count tmp
+  local key="$1" value="$2" count tmp domain
+  local -a domains=()
   [[ -f .env ]] || { echo -e "${RED}.env не найден.${NC}"; return 1; }
   case "$key" in
     PAYMENTS_ENABLED|DEV_AUTO_ISSUE)
@@ -151,6 +155,16 @@ set_env_value() {
     TLS_DOMAIN|SERVER_HOST)
       [[ "$value" =~ ^[A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?$ ]] \
         || { echo -e "${RED}Некорректное значение ${key}.${NC}"; return 1; }
+      ;;
+    TLS_DOMAINS)
+      IFS=',' read -r -a domains <<< "$value"
+      for domain in "${domains[@]}"; do
+        domain="${domain#"${domain%%[![:space:]]*}"}"
+        domain="${domain%"${domain##*[![:space:]]}"}"
+        [[ -z "$domain" ]] && continue
+        [[ "$domain" =~ ^[A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?$ ]] \
+          || { echo -e "${RED}Некорректный домен в TLS_DOMAINS: ${domain}.${NC}"; return 1; }
+      done
       ;;
     *)
       echo -e "${RED}Ключ ${key} не разрешён для автоматического изменения.${NC}"
@@ -313,7 +327,7 @@ read_tls_domain() {
   while true; do
     echo "Выберите TLS_DOMAIN для маскировки:"
     echo
-    echo "1) petrovich.ru — домен из официального примера TeleMT"
+    echo "1) ${DEFAULT_TLS_DOMAIN} — безопасный дефолт"
     echo "2) www.cloudflare.com"
     echo "3) Проверить кандидатов TLS_DOMAIN с этой VPS"
     echo "4) Ввести свой домен"
@@ -321,7 +335,7 @@ read_tls_domain() {
     read -r -p "Ваш выбор [1]: " choice
     choice="${choice:-1}"
     case "$choice" in
-      1) WIZARD_TLS_DOMAIN="petrovich.ru" ;;
+      1) WIZARD_TLS_DOMAIN="$DEFAULT_TLS_DOMAIN" ;;
       2) WIZARD_TLS_DOMAIN="www.cloudflare.com" ;;
       3)
         check_tls_candidates
@@ -344,6 +358,32 @@ read_tls_domain() {
     read -r -p "TLS-проверка не прошла. Всё равно использовать этот домен? [y/N] " answer
     [[ "$answer" =~ ^[Yy]$ ]] && return 0
   done
+}
+
+read_tls_domains() {
+  local raw domain cleaned separator=""
+  local -a domains=()
+  echo
+  echo "Введите резервные TLS_DOMAINS через запятую."
+  echo "Если оставить пустым, будет использован дефолт: ${DEFAULT_TLS_DOMAINS}"
+  read -r -p "> " raw
+  raw="${raw:-$DEFAULT_TLS_DOMAINS}"
+  IFS=',' read -r -a domains <<< "$raw"
+  WIZARD_TLS_DOMAINS=""
+  for domain in "${domains[@]}"; do
+    cleaned="${domain#"${domain%%[![:space:]]*}"}"
+    cleaned="${cleaned%"${cleaned##*[![:space:]]}"}"
+    [[ -n "$cleaned" && "$cleaned" != "$WIZARD_TLS_DOMAIN" ]] || continue
+    if [[ ! "$cleaned" =~ ^[A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?$ ]]; then
+      echo -e "${RED}Некорректный домен в TLS_DOMAINS: ${cleaned}.${NC}"
+      return 1
+    fi
+    WIZARD_TLS_DOMAINS+="${separator}${cleaned}"
+    separator=","
+  done
+  if [[ -z "$WIZARD_TLS_DOMAINS" ]]; then
+    WIZARD_TLS_DOMAINS="$DEFAULT_TLS_DOMAINS"
+  fi
 }
 
 read_support_settings() {
@@ -421,7 +461,7 @@ ADMIN_ID=${WIZARD_ADMIN_ID}
 SERVER_HOST=${WIZARD_SERVER_HOST}
 PROXY_PORT=${WIZARD_PROXY_PORT}
 TLS_DOMAIN=${WIZARD_TLS_DOMAIN}
-TLS_DOMAINS=
+TLS_DOMAINS=${WIZARD_TLS_DOMAINS}
 
 PROXY_CORE=telemt
 TELEMT_API_URL=http://mtproto:9091
@@ -566,6 +606,7 @@ first_setup_wizard() {
   read_server_host
   read_proxy_port
   read_tls_domain
+  read_tls_domains || return 1
   read_support_settings
   read_payment_settings
 
@@ -805,7 +846,7 @@ update_telemt() {
 
   backup_telemt_update_config || return 1
   echo -e "${BLUE}Перезапускаю только контейнер TeleMT...${NC}"
-  if ! $COMPOSE_CMD up -d --no-deps mtproto; then
+  if ! $COMPOSE_CMD up -d --no-deps --force-recreate mtproto; then
     echo -e "${RED}Обновление TeleMT не удалось при пересоздании контейнера.${NC}"
     echo "Backup для ручного восстановления: ${TELEMT_UPDATE_BACKUP}"
     return 1
@@ -938,6 +979,214 @@ show_proxy_logs() {
 show_support_bot_logs() {
   echo "Выход из логов: Ctrl+C"
   $COMPOSE_CMD logs -f --tail=120 support_bot
+}
+
+mask_sensitive_stream() {
+  sed -E \
+    -e 's/[0-9]{5,}:[A-Za-z0-9_-]{20,}/***masked***/g' \
+    -e 's/[0-9a-fA-F]{32}/***masked***/g' \
+    -e 's/((BOT_TOKEN|SUPPORT_BOT_TOKEN|TELEGRAM_TOKEN|ADMIN_ID|secret|Secret|token|Token|password|Password)[[:space:]]*[:=][[:space:]]*)[^[:space:],}"]+/\1***masked***/g'
+}
+
+toml_string_value() {
+  local key="$1"
+  [[ -f telemt/config.toml ]] || return 0
+  sed -nE "s/^[[:space:]]*${key}[[:space:]]*=[[:space:]]*\"([^\"]*)\".*/\1/p" telemt/config.toml | head -n 1
+}
+
+toml_number_value() {
+  local key="$1"
+  [[ -f telemt/config.toml ]] || return 0
+  sed -nE "s/^[[:space:]]*${key}[[:space:]]*=[[:space:]]*([0-9]+).*/\1/p" telemt/config.toml | head -n 1
+}
+
+normalize_csv_domains() {
+  local raw="$1"
+  printf '%s\n' "$raw" \
+    | tr ',' '\n' \
+    | sed -E 's/^[[:space:]]+//;s/[[:space:]]+$//' \
+    | grep -v '^$' \
+    | paste -sd, - \
+    || true
+}
+
+normalize_toml_domains() {
+  local raw="$1"
+  printf '%s\n' "$raw" \
+    | sed -E 's/^[^[]*\[//;s/\].*$//' \
+    | tr -d '"' \
+    | tr ',' '\n' \
+    | sed -E 's/^[[:space:]]+//;s/[[:space:]]+$//' \
+    | grep -v '^$' \
+    | paste -sd, - \
+    || true
+}
+
+proxy_diagnostics() {
+  echo
+  echo -e "${BLUE}Диагностика прокси${NC}"
+  local server_host="" proxy_port="" tls_domain="" tls_domains=""
+  local cfg_public_host="" cfg_public_port="" cfg_tls_domain="" cfg_server_port="" cfg_tls_domains_line=""
+  local env_tls_domains_norm="" cfg_tls_domains_norm="" restart_count="" health_status="" container_status=""
+  local log_errors="" ufw_status=""
+  local -a ok=() warn=() fail=() actions=()
+
+  add_ok() { ok+=("$1"); }
+  add_warn() { warn+=("$1"); }
+  add_fail() { fail+=("$1"); }
+  add_action() { actions+=("$1"); }
+
+  if [[ -f .env ]]; then
+    add_ok ".env найден."
+    server_host="$(get_env_value SERVER_HOST)"
+    proxy_port="$(get_env_value PROXY_PORT)"
+    tls_domain="$(get_env_value TLS_DOMAIN)"
+    tls_domains="$(get_env_value TLS_DOMAINS)"
+    [[ -n "$server_host" ]] && add_ok "SERVER_HOST заполнен: ${server_host}" || { add_fail "SERVER_HOST пустой."; add_action "Заполните SERVER_HOST в .env или выполните пункт 26."; }
+    [[ "$proxy_port" =~ ^[0-9]+$ ]] && add_ok "PROXY_PORT заполнен: ${proxy_port}" || { add_fail "PROXY_PORT пустой или некорректный."; add_action "Укажите PROXY_PORT=443 или другой открытый TCP-порт."; }
+    [[ -n "$tls_domain" ]] && add_ok "TLS_DOMAIN заполнен: ${tls_domain}" || { add_fail "TLS_DOMAIN пустой."; add_action "Укажите TLS_DOMAIN, например ${DEFAULT_TLS_DOMAIN}."; }
+    if [[ -z "$tls_domains" ]]; then
+      add_warn "TLS_DOMAINS пустой: альтернативные ссылки будут ограничены основным TLS_DOMAIN."
+      add_action "Добавьте TLS_DOMAINS=${DEFAULT_TLS_DOMAINS} и пересоздайте telemt/config.toml через первичную настройку или вручную синхронизируйте конфиг."
+    else
+      add_ok "TLS_DOMAINS заполнен."
+    fi
+  else
+    add_fail ".env не найден."
+    add_action "Запустите пункт 1 или создайте .env из .env.example."
+  fi
+
+  if [[ -f telemt/config.toml ]]; then
+    add_ok "telemt/config.toml найден."
+    cfg_public_host="$(toml_string_value public_host)"
+    cfg_public_port="$(toml_number_value public_port)"
+    cfg_tls_domain="$(toml_string_value tls_domain)"
+    cfg_server_port="$(toml_number_value port)"
+    cfg_tls_domains_line="$(sed -nE 's/^[[:space:]]*tls_domains[[:space:]]*=[[:space:]]*(\[.*\]).*/\1/p' telemt/config.toml | head -n 1)"
+
+    [[ "$cfg_tls_domain" == "$tls_domain" || -z "$tls_domain" ]] \
+      && add_ok "TLS_DOMAIN в .env и telemt/config.toml совпадает." \
+      || { add_fail "TLS_DOMAIN не совпадает: .env=${tls_domain:-пусто}, config=${cfg_tls_domain:-пусто}."; add_action "Синхронизируйте TLS_DOMAIN через пункт 25 или пересоздайте telemt/config.toml после backup."; }
+    [[ "$cfg_public_host" == "$server_host" || -z "$server_host" ]] \
+      && add_ok "SERVER_HOST/public_host совпадает." \
+      || { add_fail "SERVER_HOST и public_host не совпадают: .env=${server_host:-пусто}, config=${cfg_public_host:-пусто}."; add_action "Синхронизируйте SERVER_HOST через пункт 26."; }
+    [[ "$cfg_public_port" == "$proxy_port" || -z "$proxy_port" ]] \
+      && add_ok "PROXY_PORT/public_port совпадает." \
+      || { add_fail "PROXY_PORT и public_port не совпадают: .env=${proxy_port:-пусто}, config=${cfg_public_port:-пусто}."; add_action "Пересоздайте telemt/config.toml после проверки .env."; }
+    [[ "$cfg_server_port" == "443" ]] \
+      && add_ok "TeleMT внутри контейнера слушает 443." \
+      || add_warn "В telemt/config.toml server.port=${cfg_server_port:-пусто}; в docker-compose ожидается внутренний порт 443."
+
+    env_tls_domains_norm="$(normalize_csv_domains "$tls_domains")"
+    cfg_tls_domains_norm="$(normalize_toml_domains "$cfg_tls_domains_line")"
+    if [[ -z "$cfg_tls_domains_norm" ]]; then
+      add_warn "tls_domains в telemt/config.toml пустой."
+    elif [[ -n "$env_tls_domains_norm" && "$env_tls_domains_norm" != "$cfg_tls_domains_norm" ]]; then
+      add_warn "TLS_DOMAINS в .env и tls_domains в telemt/config.toml отличаются."
+      add_action "Синхронизируйте список резервных TLS-доменов в .env и telemt/config.toml."
+    else
+      add_ok "TLS_DOMAINS и tls_domains синхронизированы."
+    fi
+
+    if grep -qE '^[[:space:]]*use_middle_proxy[[:space:]]*=[[:space:]]*true' telemt/config.toml; then
+      if ! grep -qE '^[[:space:]]*ad_tag[[:space:]]*=' telemt/config.toml \
+        && ! grep -qE '^\[access\.user_ad_tags\]' telemt/config.toml; then
+        add_warn "use_middle_proxy=true, но ad_tag/user_ad_tags не настроены."
+        add_action "Если sponsor/ad_tag не используется, поставьте use_middle_proxy=false и пересоздайте mtproto."
+      else
+        add_ok "use_middle_proxy включён вместе с ad_tag/user_ad_tags."
+      fi
+    else
+      add_ok "use_middle_proxy выключен."
+    fi
+  else
+    add_fail "telemt/config.toml не найден."
+    add_action "Запустите пункт 1 или создайте telemt/config.toml из шаблона после заполнения .env."
+  fi
+
+  if command -v docker >/dev/null 2>&1 && docker version >/dev/null 2>&1; then
+    if docker inspect mtproto-shop-proxy >/dev/null 2>&1; then
+      container_status="$(docker inspect -f '{{.State.Status}}' mtproto-shop-proxy 2>/dev/null || true)"
+      restart_count="$(docker inspect -f '{{.RestartCount}}' mtproto-shop-proxy 2>/dev/null || true)"
+      health_status="$(docker inspect -f '{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}' mtproto-shop-proxy 2>/dev/null || true)"
+      [[ "$container_status" == "running" ]] && add_ok "Контейнер TeleMT запущен." || { add_fail "Контейнер TeleMT не запущен: ${container_status:-unknown}."; add_action "Выполните пункт 18 или docker compose up -d --force-recreate mtproto."; }
+      if [[ "$restart_count" =~ ^[0-9]+$ && "$restart_count" -gt 0 ]]; then
+        add_warn "RestartCount TeleMT: ${restart_count}."
+      else
+        add_ok "RestartCount TeleMT: ${restart_count:-0}."
+      fi
+      [[ "$health_status" == "healthy" || "$health_status" == "none" ]] \
+        && add_ok "Health status TeleMT: ${health_status}." \
+        || { add_fail "Health status TeleMT: ${health_status}."; add_action "Проверьте логи TeleMT и telemt/config.toml."; }
+    else
+      add_fail "Контейнер mtproto-shop-proxy не найден."
+      add_action "Запустите docker compose up -d mtproto или пункт 1/18."
+    fi
+
+    if [[ "${proxy_port:-}" =~ ^[0-9]+$ ]]; then
+      if is_port_listening "$proxy_port"; then
+        add_ok "Хостовый порт ${proxy_port}/tcp слушается."
+      else
+        add_fail "Хостовый порт ${proxy_port}/tcp не слушается."
+        add_action "Проверьте контейнер mtproto и firewall; затем выполните пункт 18."
+      fi
+      [[ "$proxy_port" == "443" ]] || add_warn "PROXY_PORT=${proxy_port}; это допустимо, но Telegram-ссылка будет не на стандартном 443."
+    fi
+
+    if container_is_running "mtproto-shop-bot"; then
+      if $COMPOSE_CMD exec -T bot python -c "import urllib.request; urllib.request.urlopen('http://mtproto:9091/v1/users', timeout=3).read()" >/dev/null 2>&1; then
+        add_ok "TeleMT API доступен из Docker-сети."
+      else
+        add_fail "TeleMT API недоступен из контейнера bot."
+        add_action "Проверьте mtproto healthcheck, whitelist API и docker compose ps."
+      fi
+    else
+      add_warn "Контейнер bot не запущен: проверка TeleMT API из Docker-сети пропущена."
+    fi
+
+    if docker inspect mtproto-shop-proxy >/dev/null 2>&1; then
+      log_errors="$(docker logs --tail=200 mtproto-shop-proxy 2>&1 \
+        | mask_sensitive_stream \
+        | grep -Ei 'error|warn|panic|fail|timeout|too many|denied|refused' \
+        | tail -n 20 || true)"
+      if [[ -n "$log_errors" ]]; then
+        add_warn "В последних логах TeleMT есть подозрительные строки:"
+      else
+        add_ok "В последних логах TeleMT явных ошибок не найдено."
+      fi
+    fi
+  else
+    add_fail "Docker недоступен."
+    add_action "Установите/запустите Docker и повторите диагностику."
+  fi
+
+  if command -v ufw >/dev/null 2>&1; then
+    ufw_status="$(ufw status 2>/dev/null | head -n 1 || true)"
+    if grep -qi "active" <<< "$ufw_status"; then
+      add_ok "UFW активен."
+    else
+      add_warn "UFW не активен или статус не определён: ${ufw_status:-unknown}."
+    fi
+  else
+    add_warn "ufw не установлен: firewall не проверен."
+  fi
+
+  echo
+  echo -e "${GREEN}✅ Нормально:${NC}"
+  if (( ${#ok[@]} )); then printf '  ✅ %s\n' "${ok[@]}"; else echo "  -"; fi
+  echo
+  echo -e "${YELLOW}⚠️ Подозрительно:${NC}"
+  if (( ${#warn[@]} )); then printf '  ⚠️ %s\n' "${warn[@]}"; else echo "  -"; fi
+  echo
+  echo -e "${RED}❌ Надо исправить:${NC}"
+  if (( ${#fail[@]} )); then printf '  ❌ %s\n' "${fail[@]}"; else echo "  -"; fi
+  if [[ -n "$log_errors" ]]; then
+    echo
+    printf '%s\n' "$log_errors" | sed 's/^/  | /'
+  fi
+  echo
+  echo -e "${BLUE}Действия:${NC}"
+  if (( ${#actions[@]} )); then printf '  - %s\n' "${actions[@]}"; else echo "  - Критичных действий не требуется."; fi
 }
 
 restart_bot() {
@@ -1248,7 +1497,7 @@ check_tls_domain() {
 
 check_tls_candidates() {
   local domain
-  local -a domains=("petrovich.ru" "www.cloudflare.com" "www.microsoft.com" "www.apple.com")
+  local -a domains=("$DEFAULT_TLS_DOMAIN" "www.cloudflare.com" "www.apple.com" "www.bing.com")
   echo -e "${YELLOW}Проверка выполняется с этой VPS и не гарантирует доступность у всех операторов РФ.${NC}"
   for domain in "${domains[@]}"; do
     echo
@@ -1346,7 +1595,7 @@ change_tls_domain() {
   echo -e "${BLUE}Текущий TLS_DOMAIN:${NC} ${current:-не задан}"
   echo
   echo "1) Проверить текущий TLS_DOMAIN"
-  echo "2) Сменить на petrovich.ru (официальный пример TeleMT)"
+  echo "2) Сменить на ${DEFAULT_TLS_DOMAIN}"
   echo "3) Сменить на www.cloudflare.com"
   echo "4) Проверить кандидатов TLS_DOMAIN с этой VPS"
   echo "5) Ввести свой домен"
@@ -1359,7 +1608,7 @@ change_tls_domain() {
       check_tls_domain "$current"
       return $?
       ;;
-    2) new_domain="petrovich.ru" ;;
+    2) new_domain="$DEFAULT_TLS_DOMAIN" ;;
     3) new_domain="www.cloudflare.com" ;;
     4)
       check_tls_candidates
@@ -1491,6 +1740,7 @@ while true; do
   echo "24) ⚙️ Изменить способ оплаты"
   echo "25) 🌐 Проверить/сменить TLS_DOMAIN"
   echo "26) 🌍 Проверить/сменить адрес сервера SERVER_HOST"
+  echo "27) 🩺 Диагностика прокси"
   echo "0) 🚪 Выход"
   echo
   read -r -p "Выберите действие: " choice
@@ -1522,6 +1772,7 @@ while true; do
     24) change_payment_mode || true; pause ;;
     25) change_tls_domain || true; pause ;;
     26) change_server_host || true; pause ;;
+    27) proxy_diagnostics || true; pause ;;
     0) exit 0 ;;
     *) echo "Неверный пункт"; pause ;;
   esac

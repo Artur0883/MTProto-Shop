@@ -52,6 +52,7 @@ __all__ = [
     "list_clients",
     "mask_secret",
     "pick_primary_tls_domain",
+    "restore_telegram_client_from_db",
     "rotate_secret",
     "rotate_telegram_secret",
     "validate_client_id",
@@ -125,19 +126,21 @@ def build_tls_proxy_link(
 
 
 def pick_primary_tls_domain() -> str:
-    """Best-known TLS domain via the picker; falls back to configured primary.
+    """Primary TLS domain for the main link.
 
-    Safe to call from any context — never raises.
+    Honors the self-heal override (`picker.active_primary`) when set and still a
+    configured domain; otherwise the configured primary. Keeps the main link
+    predictable while letting self-heal steer away from a blocked domain.
     """
     settings = get_settings()
     try:
         from tls_domains import get_picker
 
-        chosen = get_picker().pick_best()
-        if chosen:
-            return chosen
-    except Exception as exc:
-        logger.debug("event=picker_pick_failed", error=str(exc))
+        active = get_picker().active_primary
+        if active and active in settings.fallback_tls_domains:
+            return active
+    except Exception:
+        pass
     return settings.tls_domain
 
 
@@ -146,14 +149,15 @@ def build_alternative_links(
     *,
     max_count: int = 3,
     preferred_domain: str | None = None,
-    prefer_picker: bool = True,
+    prefer_picker: bool = False,
 ) -> list[tuple[str, str]]:
     """Return ordered (domain, link) pairs across all known TLS domains.
 
     Ordering:
       1. `preferred_domain` (if given and valid) is placed first.
-      2. Else if `prefer_picker=True`, picker's ranking is used.
-      3. Else configured order from `settings.fallback_tls_domains`.
+      2. Else configured order from `settings.fallback_tls_domains`.
+      3. Picker ranking is used only when `prefer_picker=True` is passed
+         explicitly by diagnostic/admin flows.
 
     The result always contains at least one entry (the primary TLS domain),
     even if probing has not run yet or the picker is unavailable.
@@ -192,6 +196,60 @@ def build_alternative_links(
         )
         for d in ordered
     ]
+
+
+def _telegram_id_from_client_id(client_id: str) -> int | None:
+    if not client_id.startswith("tg_"):
+        return None
+    raw = client_id[3:]
+    if not raw.isdigit():
+        return None
+    value = int(raw)
+    return value if value > 0 else None
+
+
+async def restore_telegram_client_from_db(client_id: str) -> str | None:
+    """Recreate a missing TeleMT user from an active SQLite subscription.
+
+    This is intentionally limited to `tg_<telegram_id>` clients and active
+    subscriptions with a stored 32-hex secret. It handles the common case where
+    SQLite still has a valid subscription, but TeleMT lost the runtime user.
+    """
+    telegram_id = _telegram_id_from_client_id(client_id)
+    if telegram_id is None:
+        return None
+
+    settings = get_settings()
+    try:
+        from database import get_active_subscription_by_telegram_id
+    except Exception as exc:
+        logger.error(
+            "event=telemt_restore_import_failed",
+            client_id=client_id,
+            error=str(exc),
+        )
+        return None
+
+    subscription = await get_active_subscription_by_telegram_id(
+        settings.database_path,
+        telegram_id,
+    )
+    if subscription is None:
+        return None
+
+    secret = (subscription.get("secret") or "").strip().lower()
+    if not secret:
+        return None
+    validate_secret(secret)
+
+    restored_secret = await create_secret(client_id, secret)
+    logger.warning(
+        "event=telemt_client_restored_from_db",
+        client_id=client_id,
+        telegram_id=telegram_id,
+        secret=restored_secret,
+    )
+    return restored_secret
 
 
 def _normalize_secret_str(raw: str) -> str | None:
@@ -372,7 +430,17 @@ async def get_link(client_id: str) -> str:
     try:
         resp = await api_call("GET", f"/v1/users/{client_id}")
     except ClientNotFoundError:
-        raise ClientNotFoundError(f"Клиент {client_id} не найден")
+        restored_secret = await restore_telegram_client_from_db(client_id)
+        if restored_secret:
+            return build_tls_proxy_link(
+                settings.server_host,
+                settings.proxy_port,
+                restored_secret,
+                settings.tls_domain,
+            )
+        raise ClientNotFoundError(
+            f"Клиент {client_id} не найден в TeleMT, активная подписка с secret в SQLite не найдена"
+        )
 
     api_link_found = _extract_tls_link(resp) is not None
     secret = _extract_secret(resp)
@@ -381,15 +449,20 @@ async def get_link(client_id: str) -> str:
         secret = await create_secret(client_id)
         secret_source = "create_or_existing"
 
-    pairs = build_alternative_links(secret, max_count=1, prefer_picker=True)
-    domain, link = pairs[0]
+    domain = settings.tls_domain
+    link = build_tls_proxy_link(
+        settings.server_host,
+        settings.proxy_port,
+        secret,
+        domain,
+    )
     logger.info(
         "event=link_built",
         client_id=client_id,
         link_source="local_fake_tls",
-        prefer_picker=True,
+        prefer_picker=False,
         tls_domain=domain,
-        used_configured_fallback=domain == settings.tls_domain,
+        used_configured_fallback=True,
         api_tls_link_found=api_link_found,
         secret_source=secret_source,
         server_host=settings.server_host,

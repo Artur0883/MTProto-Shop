@@ -24,13 +24,16 @@ def is_admin(telegram_id: int | None) -> bool:
     return settings.admin_id is not None and telegram_id == settings.admin_id
 
 
-async def heartbeat_loop() -> None:
+async def heartbeat_loop(bot: Bot) -> None:
     HEARTBEAT_PATH.parent.mkdir(parents=True, exist_ok=True)
     while True:
         try:
+            # Probe Telegram for real, not just "the loop is alive": a stalled
+            # poller no longer keeps the healthcheck green.
+            await asyncio.wait_for(bot.get_me(), timeout=10)
             HEARTBEAT_PATH.touch()
         except Exception:
-            logger.exception("event=support_bot_heartbeat_failed")
+            logger.warning("event=support_bot_heartbeat_probe_failed")
         await asyncio.sleep(30)
 
 
@@ -145,11 +148,11 @@ async def main() -> None:
         logger.warning("event=support_bot_admin_id_unset")
 
     await init_db(settings.database_path)
-    asyncio.create_task(heartbeat_loop())
     bot = Bot(
         token=settings.support_bot_token,
         default=DefaultBotProperties(parse_mode=ParseMode.HTML),
     )
+    asyncio.create_task(heartbeat_loop(bot))
     dp = Dispatcher()
     dp.include_router(router)
 

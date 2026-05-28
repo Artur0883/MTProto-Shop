@@ -84,6 +84,19 @@ class TLSDomainPicker:
         self._lock = asyncio.Lock()
         self._task: asyncio.Task | None = None
         self._interval = DEFAULT_PROBE_INTERVAL_SECONDS
+        self._active_primary: str | None = None
+
+    @property
+    def active_primary(self) -> str | None:
+        """Domain the self-heal loop currently advertises instead of the
+        configured primary. None means: use the configured primary."""
+        return self._active_primary
+
+    def set_active_primary(self, domain: str) -> None:
+        self._active_primary = domain
+
+    def clear_active_primary(self) -> None:
+        self._active_primary = None
 
     def _ensure_stats(self, domains: list[str]) -> None:
         for d in domains:

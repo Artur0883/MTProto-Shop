@@ -4,6 +4,10 @@ services:
     container_name: mtproto-shop-proxy
     restart: unless-stopped
     working_dir: /etc/telemt
+    labels:
+      - autoheal=true
+    mem_limit: 1g
+    mem_reservation: 128m
     healthcheck:
       test: ["CMD", "/app/telemt", "healthcheck", "/etc/telemt/config.toml", "--mode", "liveness"]
       interval: 30s
@@ -29,8 +33,8 @@ services:
       - .env
     environment:
       PROXY_PORT: ${PROXY_PORT:-443}
-      TLS_DOMAIN: ${TLS_DOMAIN:-petrovich.ru}
-      TLS_DOMAINS: ${TLS_DOMAINS:-}
+      TLS_DOMAIN: ${TLS_DOMAIN:-www.microsoft.com}
+      TLS_DOMAINS: ${TLS_DOMAINS:-www.cloudflare.com,www.apple.com,www.bing.com}
     ports:
       - "${PROXY_PORT:-443}:443/tcp"
     expose:
@@ -44,6 +48,10 @@ services:
       dockerfile: bot/Dockerfile
     container_name: mtproto-shop-bot
     restart: unless-stopped
+    labels:
+      - autoheal=true
+    mem_limit: 512m
+    mem_reservation: 128m
     depends_on:
       mtproto:
         condition: service_healthy
@@ -71,6 +79,10 @@ services:
       dockerfile: bot/Dockerfile
     container_name: mtproto-shop-support-bot
     restart: unless-stopped
+    labels:
+      - autoheal=true
+    mem_limit: 384m
+    mem_reservation: 64m
     depends_on:
       mtproto:
         condition: service_healthy
@@ -91,3 +103,26 @@ services:
     volumes:
       - ./data:/app/data
       - ./logs:/app/logs
+
+  # Watchdog: Docker's restart policy only restarts a container when its process
+  # exits. A container that goes "unhealthy" but keeps running (hang, deadlock,
+  # stalled network) is left untouched. autoheal watches for unhealthy containers
+  # labelled autoheal=true and restarts them.
+  autoheal:
+    image: willfarrell/autoheal:latest
+    container_name: mtproto-shop-autoheal
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    environment:
+      AUTOHEAL_CONTAINER_LABEL: autoheal
+      AUTOHEAL_INTERVAL: "10"
+      AUTOHEAL_START_PERIOD: "60"
+      AUTOHEAL_DEFAULT_STOP_TIMEOUT: "30"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock

@@ -227,7 +227,7 @@ def client_id_for(telegram_id: int) -> str:
 
 
 def build_primary_link(secret: str) -> str:
-    """Build the primary tg://proxy link using the picker-selected best TLS domain."""
+    """Build the primary tg://proxy link using configured TLS_DOMAIN."""
     settings = get_settings()
     return build_tls_proxy_link(
         settings.server_host,
@@ -235,6 +235,35 @@ def build_primary_link(secret: str) -> str:
         secret,
         pick_primary_tls_domain(),
     )
+
+
+async def ensure_subscription_secret(telegram_id: int, subscription: dict) -> str:
+    """Ensure TeleMT has the active SQLite secret before showing a link."""
+    settings = get_settings()
+    db_secret = (subscription.get("secret") or "").strip().lower()
+    try:
+        actual_secret = await create_secret(client_id_for(telegram_id), db_secret)
+    except (CircuitOpenError, TeleMTError) as exc:
+        logger.warning(
+            "event=ensure_telemt_client_failed_using_db_secret",
+            telegram_id=telegram_id,
+            error=str(exc),
+        )
+        return db_secret
+
+    if actual_secret != db_secret:
+        updated = await update_latest_subscription_secret_by_telegram_id(
+            settings.database_path,
+            telegram_id,
+            actual_secret,
+        )
+        if updated is not None:
+            logger.warning(
+                "event=subscription_secret_resynced_from_telemt",
+                telegram_id=telegram_id,
+                secret=actual_secret,
+            )
+    return actual_secret
 
 
 def support_url(contact: str) -> str:
@@ -304,7 +333,9 @@ async def issue_access(telegram_id: int, tariff: Tariff) -> dict:
 
 
 async def send_granted_access(message: Message, tariff: Tariff, subscription: dict) -> None:
-    link = build_primary_link(subscription["secret"])
+    telegram_id = int(subscription["telegram_id"])
+    secret = await ensure_subscription_secret(telegram_id, subscription)
+    link = build_primary_link(secret)
     await message.answer(
         "<b>🎉 Доступ активирован!</b>\n\n"
         f"📦 Тариф: {escape(tariff.title)}\n"
@@ -935,9 +966,8 @@ async def send_alt_links(callback: CallbackQuery) -> None:
         await callback.answer("Сначала оформите доступ.", show_alert=True)
         return
 
-    links = build_alternative_links(
-        subscription["secret"], max_count=3, prefer_picker=True
-    )
+    secret = await ensure_subscription_secret(user.id, subscription)
+    links = build_alternative_links(secret, max_count=3, prefer_picker=False)
 
     text_lines = [
         "<b>🌐 Альтернативные ссылки</b>",
