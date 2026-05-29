@@ -557,6 +557,24 @@ async def get_active_subscriptions_for_reminders(
         return [dict(row) for row in await cursor.fetchall()]
 
 
+async def get_all_active_subscriptions(
+    database_path: Path,
+) -> list[dict[str, Any]]:
+    """All currently-active (status active AND not expired) subscriptions with
+    telegram_id + secret. Used by the multi-node reconciler."""
+    async with open_db(database_path) as db:
+        cursor = await db.execute(
+            """
+            SELECT s.*, u.telegram_id
+            FROM subscriptions s
+            JOIN users u ON u.id = s.user_id
+            WHERE s.status = ? AND s.expires_at > ?
+            """,
+            (ACTIVE_STATUS, to_db_datetime(utc_now())),
+        )
+        return [dict(row) for row in await cursor.fetchall()]
+
+
 async def mark_reminder_sent(
     database_path: Path,
     subscription_id: int,

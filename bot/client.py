@@ -53,6 +53,7 @@ from keyboards import (
     instructions_menu,
     manual_pay_keyboard,
     my_subscription_keyboard,
+    server_links_keyboard,
     support_keyboard,
     try_or_buy_keyboard,
 )
@@ -62,11 +63,13 @@ from proxy_manager import (
     RotateCooldownError,
     TeleMTError,
     build_alternative_links,
+    build_node_links,
     build_tls_proxy_link,
     create_secret,
     pick_primary_tls_domain,
     rotate_secret,
 )
+from nodes import get_nodes, primary_node
 from rate_limit import check_action_rate, format_retry_after
 from tariffs import Tariff, get_tariff
 
@@ -100,7 +103,7 @@ HELP_CHECKLIST_TEXT = (
     "1. Обновите Telegram до последней версии.\n"
     "2. Отключите другой VPN или proxy.\n"
     "3. Попробуйте другую сеть: Wi-Fi или мобильный интернет.\n"
-    "4. Нажмите «🌐 Альтернативные ссылки» и попробуйте другой вариант.\n"
+    "4. Нажмите «🌐 Запасные ссылки» и попробуйте другой вариант.\n"
     "5. В разделе «📅 Моя подписка» нажмите «🔄 Обновить ключ».\n"
     "6. Если не помогло — напишите в поддержку."
 )
@@ -112,7 +115,7 @@ INSTRUCTION_TEXTS = {
         "3. Telegram спросит «Включить прокси?» — нажмите <b>ВКЛЮЧИТЬ</b>.\n"
         "4. Готово. В правом верхнем углу появится значок щита 🛡.\n\n"
         "<b>Если ссылка не открывается</b>\n"
-        "• нажмите «🌐 Альтернативные ссылки» и попробуйте другой домен;\n"
+        "• нажмите «🌐 Запасные ссылки» и попробуйте другую;\n"
         "• удалите старые прокси: Настройки → Данные и память → Прокси;\n"
         "• отключите другой VPN, если он включён."
     ),
@@ -124,7 +127,7 @@ INSTRUCTION_TEXTS = {
         "3. В Telegram появится значок активного proxy.\n\n"
         "<b>Проверить или удалить proxy вручную:</b>\n"
         "Telegram → Настройки → Данные и память → Прокси.\n\n"
-        "Если подключение нестабильно, нажмите «🌐 Альтернативные ссылки» "
+        "Если подключение нестабильно, нажмите «🌐 Запасные ссылки» "
         "и попробуйте следующий вариант."
     ),
     "client_instr_ipad": (
@@ -175,7 +178,7 @@ INSTRUCTION_TEXTS = {
         "<b>Telegram Desktop</b> (с telegram.org):\n"
         "Действия как для Windows/Linux — см. инструкцию «💻 Desktop».\n\n"
         "Если соединение нестабильно, отключите другой VPN/proxy и попробуйте "
-        "вариант из «🌐 Альтернативные ссылки»."
+        "вариант из «🌐 Запасные ссылки»."
     ),
     "client_instr_x": (
         "<b>📱 Telegram X</b>\n\n"
@@ -234,6 +237,28 @@ def build_primary_link(secret: str) -> str:
         settings.proxy_port,
         secret,
         pick_primary_tls_domain(),
+    )
+
+
+async def maybe_send_backup_servers(message: Message, secret: str) -> None:
+    """When more than one proxy node is configured, offer the client the backup
+    server link(s) — same key, different server/country. No-op for one node."""
+    nodes = get_nodes()
+    if len(nodes) <= 1:
+        return
+    primary = primary_node(nodes)
+    backups = [
+        (name, link)
+        for (name, link) in build_node_links(secret)
+        if name != primary.name
+    ]
+    if not backups:
+        return
+    await message.answer(
+        "🔁 <b>Запасной сервер</b>\n\n"
+        "Если основная ссылка перестанет подключаться — откройте запасную "
+        "(другой сервер, другая страна). Ключ тот же.",
+        reply_markup=server_links_keyboard(backups),
     )
 
 
@@ -343,6 +368,7 @@ async def send_granted_access(message: Message, tariff: Tariff, subscription: di
         f"{PROXY_CLEANUP_NOTICE}",
         reply_markup=connect_keyboard(link),
     )
+    await maybe_send_backup_servers(message, secret)
 
 
 async def grant_free_trial(message: Message, user: User) -> bool | None:
@@ -805,7 +831,7 @@ async def choose_client_tariff(callback: CallbackQuery) -> None:
         await message.answer(
             payment_notice
             + f"<b>📦 Тариф: {escape(tariff.title)}</b>\n\n"
-            f"Что вы получаете: личный приватный MTProto-ключ на {tariff.days} дней, "
+            f"Что вы получаете: личный ключ для подключения на {tariff.days} дней, "
             "отдельный от других клиентов.\n"
             "Оплата: через оператора, ответ 5–10 минут.\n\n"
             "Нажмите кнопку ниже, чтобы оформить.",
@@ -866,6 +892,7 @@ async def send_my_link(message: Message, telegram_id: int) -> None:
         f"{PROXY_CLEANUP_NOTICE}",
         reply_markup=connect_keyboard(link),
     )
+    await maybe_send_backup_servers(message, subscription["secret"])
 
 
 @router.message(
@@ -970,14 +997,13 @@ async def send_alt_links(callback: CallbackQuery) -> None:
     links = build_alternative_links(secret, max_count=3, prefer_picker=False)
 
     text_lines = [
-        "<b>🌐 Альтернативные ссылки</b>",
+        "<b>🌐 Запасные ссылки</b>",
         "",
-        "Попробуйте варианты по очереди — каждая использует другой домен TLS-маскировки. "
-        "Если один заблокирован вашим оператором, другой обычно работает.",
+        "Попробуйте по очереди — если одна не открывается, следующая обычно работает.",
         "",
     ]
     for idx, (domain, link) in enumerate(links, 1):
-        text_lines.append(f"<b>Вариант {idx}</b> (домен {escape(domain)}):")
+        text_lines.append(f"<b>Запасная ссылка {idx}</b>:")
         text_lines.append(f"<code>{escape(link)}</code>")
         text_lines.append("")
     text_lines.append("💡 Удерживайте ссылку, чтобы скопировать её вручную.")
@@ -1065,8 +1091,8 @@ async def rotate_client_key(callback: CallbackQuery) -> None:
     await message.answer(
         "🔄 Ключ обновлён. Старый перестанет работать в течение ~5 секунд.\n\n"
         f"{PROXY_CLEANUP_NOTICE}\n\n"
-        "💡 Если новая ссылка тоже не работает — нажмите «🌐 Альтернативные ссылки» "
-        "и попробуйте другой домен TLS-маскировки.",
+        "💡 Если новая ссылка тоже не работает — нажмите «🌐 Запасные ссылки» "
+        "и попробуйте другую.",
         reply_markup=connect_keyboard(link),
     )
 

@@ -102,6 +102,12 @@ class Settings(BaseSettings):
     self_heal_switch_cooldown: float = Field(default=600.0, ge=0)
     self_heal_max_switches_per_day: int = Field(default=6, ge=0)
 
+    # --- Proxy nodes (multi-server) ---
+    # JSON list: [{"name","public_host","api_url","primary"}]. Empty => single node
+    # derived from SERVER_HOST + TELEMT_API_URL (backward compatible).
+    proxy_nodes: list[dict] = Field(default_factory=list)
+    reconcile_interval: float = Field(default=300.0, gt=0)
+
     @field_validator("admin_id", mode="before")
     @classmethod
     def _parse_admin_id(cls, v):

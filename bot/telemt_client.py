@@ -1,7 +1,8 @@
 """Async TeleMT HTTP API client.
 
-Single shared aiohttp.ClientSession per process, circuit breaker for
-infrastructure failures, decorrelated-jitter retries for transient errors.
+Per-base-url aiohttp.ClientSession + circuit breaker, decorrelated-jitter
+retries for transient errors.  Pass ``base_url`` to target a specific proxy
+node; omit it (or pass None) to fall back to ``settings.telemt_api_url``.
 """
 from __future__ import annotations
 
@@ -85,8 +86,9 @@ class _CircuitBreaker:
                 )
 
 
-_session: aiohttp.ClientSession | None = None
-_circuit: _CircuitBreaker | None = None
+# Per-base-url registries replacing the single _session / _circuit globals.
+_sessions: dict[str, aiohttp.ClientSession] = {}
+_circuits: dict[str, _CircuitBreaker] = {}
 _init_lock: asyncio.Lock | None = None
 
 
@@ -97,42 +99,68 @@ def _get_init_lock() -> asyncio.Lock:
     return _init_lock
 
 
-async def _ensure_initialized() -> tuple[aiohttp.ClientSession, _CircuitBreaker]:
-    global _session, _circuit
-    if _session is not None and _circuit is not None and not _session.closed:
-        return _session, _circuit
+async def _ensure_initialized(
+    base_url: str,
+) -> tuple[aiohttp.ClientSession, _CircuitBreaker]:
+    """Return (session, circuit) for *base_url*, creating them on first use."""
+    session = _sessions.get(base_url)
+    circuit = _circuits.get(base_url)
+    if session is not None and circuit is not None and not session.closed:
+        return session, circuit
+
     async with _get_init_lock():
-        settings = get_settings()
-        if _session is None or _session.closed:
+        # Re-check inside the lock (double-checked locking).
+        session = _sessions.get(base_url)
+        if session is None or session.closed:
+            settings = get_settings()
             timeout = aiohttp.ClientTimeout(total=settings.telemt_api_timeout)
-            _session = aiohttp.ClientSession(
+            session = aiohttp.ClientSession(
                 timeout=timeout,
                 headers={"User-Agent": "MTProto-Shop/1.0"},
                 connector=aiohttp.TCPConnector(limit=20, ttl_dns_cache=300),
             )
-        if _circuit is None:
-            _circuit = _CircuitBreaker(
+            _sessions[base_url] = session
+
+        if _circuits.get(base_url) is None:
+            settings = get_settings()
+            _circuits[base_url] = _CircuitBreaker(
                 threshold=settings.telemt_circuit_breaker_threshold,
                 recovery=settings.telemt_circuit_breaker_recovery,
             )
-    return _session, _circuit
+
+    return _sessions[base_url], _circuits[base_url]
 
 
 async def close_telemt() -> None:
-    """Close the shared session. Call on graceful shutdown."""
-    global _session
-    if _session is not None and not _session.closed:
-        await _session.close()
-    _session = None
+    """Close all per-node sessions. Call on graceful shutdown."""
+    for url, session in list(_sessions.items()):
+        if not session.closed:
+            await session.close()
+    _sessions.clear()
+    _circuits.clear()
 
 
-def get_circuit_state() -> str:
-    """Return current CB state for diagnostics (admin /status)."""
-    return _circuit.state if _circuit else "unknown"
+def get_circuit_state(base_url: str | None = None) -> str:
+    """Return current CB state for diagnostics (admin /status).
+
+    If *base_url* is None the default ``settings.telemt_api_url`` is used.
+    Returns ``"unknown"`` when no circuit has been created for that URL yet.
+    """
+    resolved = base_url or get_settings().telemt_api_url
+    cb = _circuits.get(resolved)
+    return cb.state if cb is not None else "unknown"
 
 
-async def api_call(method: str, path: str, body: dict | None = None) -> Any:
-    """Perform one TeleMT API call. Returns parsed JSON or None.
+async def api_call(
+    method: str,
+    path: str,
+    body: dict | None = None,
+    *,
+    base_url: str | None = None,
+) -> Any:
+    """Perform one TeleMT API call against *base_url* (or the default).
+
+    Returns parsed JSON or None.
 
     Raises:
         ClientNotFoundError: on HTTP 404.
@@ -140,13 +168,14 @@ async def api_call(method: str, path: str, body: dict | None = None) -> Any:
         TeleMTError: on persistent transport or 5xx failure.
     """
     settings = get_settings()
-    session, cb = await _ensure_initialized()
+    base_url = base_url or settings.telemt_api_url
+    session, cb = await _ensure_initialized(base_url)
 
     if not await cb.allow():
         logger.warning("event=telemt_blocked_by_cb", method=method, path=path)
         raise CircuitOpenError("TeleMT circuit breaker is OPEN")
 
-    url = f"{settings.telemt_api_url}{path}"
+    url = f"{base_url}{path}"
     base_delay = 0.2
     cap_delay = 2.5
     prev = base_delay
@@ -213,10 +242,10 @@ async def api_call(method: str, path: str, body: dict | None = None) -> Any:
     raise last_exc
 
 
-async def is_available() -> bool:
+async def is_available(base_url: str | None = None) -> bool:
     """Lightweight health probe used by /admin status and the monitor loop."""
     try:
-        await api_call("GET", "/v1/users")
+        await api_call("GET", "/v1/users", base_url=base_url)
         return True
     except (TeleMTError, CircuitOpenError):
         return False

@@ -26,6 +26,7 @@ from telemt_client import (
     get_circuit_state,
     is_available,
 )
+from nodes import get_nodes, primary_node
 
 
 logger = get_logger(__name__)
@@ -42,6 +43,7 @@ __all__ = [
     "TeleMTError",
     "RotateCooldownError",
     "build_alternative_links",
+    "build_node_links",
     "build_tls_proxy_link",
     "create_secret",
     "delete_secret",
@@ -198,6 +200,20 @@ def build_alternative_links(
     ]
 
 
+def build_node_links(secret: str) -> list[tuple[str, str]]:
+    """Return (node_name, tg://proxy link) for each configured proxy node, using
+    the selected primary TLS domain. With one node this is just the primary link."""
+    settings = get_settings()
+    domain = pick_primary_tls_domain()
+    return [
+        (
+            node.name,
+            build_tls_proxy_link(node.public_host, settings.proxy_port, secret, domain),
+        )
+        for node in get_nodes()
+    ]
+
+
 def _telegram_id_from_client_id(client_id: str) -> int | None:
     if not client_id.startswith("tg_"):
         return None
@@ -343,43 +359,94 @@ def _extract_secret(data: Any) -> str | None:
     return None
 
 
+async def _ensure_user_on_node(base_url: str, client_id: str, secret: str) -> str:
+    """Ensure `client_id` exists on the node at `base_url`. Returns the effective
+    secret (an existing one wins). May raise on transport failure."""
+    try:
+        existing = await api_call("GET", f"/v1/users/{client_id}", base_url=base_url)
+        existing_secret = _extract_secret(existing)
+        if existing_secret:
+            return existing_secret
+        await api_call(
+            "POST", "/v1/users", {"username": client_id, "secret": secret}, base_url=base_url
+        )
+        return secret
+    except ClientNotFoundError:
+        await api_call(
+            "POST", "/v1/users", {"username": client_id, "secret": secret}, base_url=base_url
+        )
+        return secret
+
+
 async def create_secret(client_id: str, provided_secret: str | None = None) -> str:
-    """Create or return an existing TeleMT user; idempotent."""
+    """Create or return an existing TeleMT user on every node; idempotent.
+
+    The secret is settled on the primary node (an existing one wins), then the
+    same secret is ensured on every other node. A node that is unreachable is
+    logged and left for the reconciler — it never blocks issuing access."""
     validate_client_id(client_id)
     secret = (provided_secret or generate_secret()).lower()
     validate_secret(secret)
 
-    try:
-        existing = await api_call("GET", f"/v1/users/{client_id}")
-        existing_secret = _extract_secret(existing)
-        if existing_secret:
-            return existing_secret
-    except ClientNotFoundError:
-        pass
+    nodes = get_nodes()
+    primary = primary_node(nodes)
 
-    await api_call("POST", "/v1/users", {"username": client_id, "secret": secret})
-    logger.info("event=secret_created", client_id=client_id, secret=secret)
+    # Primary node: failures here propagate so callers can fall back.
+    secret = await _ensure_user_on_node(primary.api_url, client_id, secret)
+    logger.info("event=secret_created", client_id=client_id, secret=secret, node=primary.name)
+
+    # Other nodes: ensure the same secret (best-effort).
+    for node in nodes:
+        if node.api_url == primary.api_url:
+            continue
+        try:
+            node_secret = await _ensure_user_on_node(node.api_url, client_id, secret)
+            if node_secret != secret:
+                await api_call(
+                    "POST",
+                    f"/v1/users/{client_id}/rotate-secret",
+                    {"secret": secret},
+                    base_url=node.api_url,
+                )
+        except Exception:
+            logger.warning("event=node_provision_failed", client_id=client_id, node=node.name)
     return secret
 
 
 async def delete_secret(client_id: str) -> str:
-    """Delete a TeleMT user. Returns the previously-known secret if it could
-    be fetched (best-effort)."""
+    """Delete a TeleMT user from every node (best-effort). Returns the
+    previously-known secret if it could be fetched from any node.
+
+    Raises ClientNotFoundError only if the user was absent on all nodes."""
     validate_client_id(client_id)
     settings = get_settings()
     if client_id == settings.telemt_system_user:
         raise ValueError(f"Нельзя удалять системного пользователя {client_id}")
 
+    nodes = get_nodes()
     secret_known = ""
-    try:
-        existing = await api_call("GET", f"/v1/users/{client_id}")
-        secret_known = _extract_secret(existing) or ""
-    except ClientNotFoundError:
-        raise ClientNotFoundError(f"Клиент {client_id} не найден")
+    found_anywhere = False
 
-    try:
-        await api_call("DELETE", f"/v1/users/{client_id}")
-    except ClientNotFoundError:
+    for node in nodes:
+        try:
+            existing = await api_call("GET", f"/v1/users/{client_id}", base_url=node.api_url)
+            found_anywhere = True
+            if not secret_known:
+                secret_known = _extract_secret(existing) or ""
+        except ClientNotFoundError:
+            pass
+        except Exception:
+            logger.warning("event=node_delete_lookup_failed", client_id=client_id, node=node.name)
+            continue
+        try:
+            await api_call("DELETE", f"/v1/users/{client_id}", base_url=node.api_url)
+            found_anywhere = True
+        except ClientNotFoundError:
+            pass
+        except Exception:
+            logger.warning("event=node_delete_failed", client_id=client_id, node=node.name)
+
+    if not found_anywhere:
         raise ClientNotFoundError(f"Клиент {client_id} не найден")
 
     logger.info("event=secret_deleted", client_id=client_id, secret=secret_known)
@@ -402,18 +469,45 @@ async def rotate_secret(client_id: str) -> str:
                 )
         _rotate_last[client_id] = now
 
+    nodes = get_nodes()
+    primary = primary_node(nodes)
     new_secret = generate_secret()
     try:
         resp = await api_call(
             "POST",
             f"/v1/users/{client_id}/rotate-secret",
             {"secret": new_secret},
+            base_url=primary.api_url,
         )
     except ClientNotFoundError:
         raise ClientNotFoundError(f"Клиент {client_id} не найден")
 
     actual = _extract_secret(resp) or new_secret
-    logger.info("event=secret_rotated", client_id=client_id, secret=actual)
+    logger.info("event=secret_rotated", client_id=client_id, secret=actual, node=primary.name)
+
+    # Align the same secret on the other nodes (best-effort).
+    for node in nodes:
+        if node.api_url == primary.api_url:
+            continue
+        try:
+            await api_call(
+                "POST",
+                f"/v1/users/{client_id}/rotate-secret",
+                {"secret": actual},
+                base_url=node.api_url,
+            )
+        except ClientNotFoundError:
+            try:
+                await api_call(
+                    "POST",
+                    "/v1/users",
+                    {"username": client_id, "secret": actual},
+                    base_url=node.api_url,
+                )
+            except Exception:
+                logger.warning("event=node_rotate_create_failed", client_id=client_id, node=node.name)
+        except Exception:
+            logger.warning("event=node_rotate_failed", client_id=client_id, node=node.name)
     return actual
 
 

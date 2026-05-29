@@ -122,13 +122,13 @@ def connect_keyboard(link: str, *, show_alt_links: bool = True) -> InlineKeyboar
         button_url = link
 
     rows = [
-        [InlineKeyboardButton(text="🔐 Подключиться к MTProto", url=button_url)],
+        [InlineKeyboardButton(text="🔐 Подключиться", url=button_url)],
     ]
     if show_alt_links:
         rows.append(
             [
                 InlineKeyboardButton(
-                    text="🌐 Альтернативные ссылки",
+                    text="🌐 Запасные ссылки",
                     callback_data="client_alt_links",
                 )
             ]
@@ -154,8 +154,21 @@ def alt_links_keyboard(links: list[tuple[str, str]]) -> InlineKeyboardMarkup:
         else:
             url = link
         rows.append(
-            [InlineKeyboardButton(text=f"🌐 Вариант {idx}: {domain}", url=url)]
+            [InlineKeyboardButton(text=f"🌐 Запасная ссылка {idx}", url=url)]
         )
+    rows.append([InlineKeyboardButton(text=BACK_BUTTON, callback_data="client_back")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def server_links_keyboard(node_links: list[tuple[str, str]]) -> InlineKeyboardMarkup:
+    """Connect buttons for backup servers (one per proxy node), labelled by name."""
+    rows: list[list[InlineKeyboardButton]] = []
+    for name, link in node_links:
+        if link.startswith("tg://proxy?"):
+            url = "https://t.me/proxy?" + link.split("?", 1)[1]
+        else:
+            url = link
+        rows.append([InlineKeyboardButton(text=f"🔐 Подключиться — {name}", url=url)])
     rows.append([InlineKeyboardButton(text=BACK_BUTTON, callback_data="client_back")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 

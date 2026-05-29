@@ -16,6 +16,8 @@ from database import init_db
 from logging_setup import configure_logging, get_logger
 import runtime
 from subscriptions import subscription_worker
+from nodes import get_nodes
+from reconciler import reconciler_loop
 from self_heal import self_heal_loop
 from telemt_client import close_telemt, is_available
 from tls_domains import get_picker
@@ -114,6 +116,7 @@ async def main() -> None:
     heartbeat_task: asyncio.Task | None = None
     telemt_monitor_task: asyncio.Task | None = None
     self_heal_task: asyncio.Task | None = None
+    reconciler_task: asyncio.Task | None = None
     picker = get_picker()
 
     async def healthcheck_ping() -> None:
@@ -194,13 +197,15 @@ async def main() -> None:
             await asyncio.sleep(10)
 
     async def on_startup() -> None:
-        nonlocal heartbeat_task, telemt_monitor_task, worker_task, self_heal_task
+        nonlocal heartbeat_task, telemt_monitor_task, worker_task, self_heal_task, reconciler_task
         runtime.STARTED_AT = datetime.now(UTC)
         worker_task = asyncio.create_task(subscription_worker(bot))
         heartbeat_task = asyncio.create_task(bot_heartbeat_loop())
         telemt_monitor_task = asyncio.create_task(telemt_monitor_loop())
         if settings.self_heal_enabled:
             self_heal_task = asyncio.create_task(self_heal_loop(bot))
+        if len(get_nodes()) > 1:
+            reconciler_task = asyncio.create_task(reconciler_loop(bot))
         picker.start()
         # Probe immediately so the first user request already has rankings.
         asyncio.create_task(picker.probe_all())
@@ -212,7 +217,7 @@ async def main() -> None:
         )
 
     async def on_shutdown() -> None:
-        for task in (worker_task, heartbeat_task, telemt_monitor_task, self_heal_task):
+        for task in (worker_task, heartbeat_task, telemt_monitor_task, self_heal_task, reconciler_task):
             if task is not None:
                 task.cancel()
                 try:
