@@ -154,42 +154,54 @@ async def main() -> None:
             await asyncio.sleep(30)
 
     async def telemt_monitor_loop() -> None:
-        failed_since: float | None = None
-        notified = False
+        failed_since: dict[str, float] = {}
+        notified: dict[str, bool] = {}
         while True:
             try:
-                available = await is_available()
                 now = time.monotonic()
-                if available:
-                    if notified and settings.admin_id is not None:
-                        try:
-                            await bot.send_message(
-                                settings.admin_id,
-                                "✅ TeleMT API снова доступен.",
+                nodes = get_nodes()
+                multi = len(nodes) > 1
+                for node in nodes:
+                    available = await is_available(node.api_url)
+                    if available:
+                        if notified.get(node.api_url) and settings.admin_id is not None:
+                            try:
+                                await bot.send_message(
+                                    settings.admin_id,
+                                    f"✅ Сервер «{node.name}» ({node.public_host}) снова доступен."
+                                    if multi
+                                    else "✅ TeleMT API снова доступен.",
+                                )
+                            except Exception:
+                                logger.exception("event=telemt_recovery_notification_failed")
+                            logger.info("event=telemt_api_recovered", node=node.name)
+                        failed_since.pop(node.api_url, None)
+                        notified[node.api_url] = False
+                    else:
+                        started = failed_since.setdefault(node.api_url, now)
+                        if (
+                            not notified.get(node.api_url)
+                            and now - started >= 30
+                            and settings.admin_id is not None
+                        ):
+                            try:
+                                await bot.send_message(
+                                    settings.admin_id,
+                                    f"❌ Сервер «{node.name}» ({node.public_host}) не отвечает "
+                                    "более 30 секунд.\nПроверьте этот VPS: mtp → 3 (статус) "
+                                    "и mtp → 5 (логи TeleMT)."
+                                    if multi
+                                    else "❌ TeleMT API не отвечает более 30 секунд. "
+                                    "Проверьте VPS: mtp → 3 (статус) и mtp → 5 (логи TeleMT).",
+                                )
+                            except Exception:
+                                logger.exception("event=telemt_outage_notification_failed")
+                            logger.error(
+                                "event=telemt_api_unavailable",
+                                node=node.name,
+                                duration_seconds=30,
                             )
-                        except Exception:
-                            logger.exception("event=telemt_recovery_notification_failed")
-                        logger.info("event=telemt_api_recovered")
-                    failed_since = None
-                    notified = False
-                else:
-                    if failed_since is None:
-                        failed_since = now
-                    if (
-                        not notified
-                        and now - failed_since >= 30
-                        and settings.admin_id is not None
-                    ):
-                        try:
-                            await bot.send_message(
-                                settings.admin_id,
-                                "❌ TeleMT API не отвечает более 30 секунд. "
-                                "Проверьте VPS: mtp → 3 (статус) и mtp → 5 (логи TeleMT).",
-                            )
-                        except Exception:
-                            logger.exception("event=telemt_outage_notification_failed")
-                        logger.error("event=telemt_api_unavailable", duration_seconds=30)
-                        notified = True
+                            notified[node.api_url] = True
             except Exception:
                 # Never let an unexpected error kill the monitor — that would
                 # silently stop all TeleMT outage alerts to the admin.

@@ -45,6 +45,8 @@ from keyboards import (
     user_card_keyboard,
 )
 from logging_setup import get_logger
+from nodes import get_nodes
+from telemt_client import is_available
 from proxy_manager import (
     CircuitOpenError,
     ClientNotFoundError,
@@ -580,6 +582,20 @@ async def system_status(message: Message) -> None:
 
     last_restart = _read_last_restart() or "через бота ещё не запускали"
 
+    nodes = get_nodes()
+    if len(nodes) > 1:
+        node_lines = ["<b>🖥 Серверы (узлы)</b>"]
+        for node in nodes:
+            up = await is_available(node.api_url)
+            mark = "✅ доступен" if up else "❌ не отвечает"
+            role = "основной" if node.primary else "запасной"
+            node_lines.append(
+                f"   {escape(node.name)} ({escape(node.public_host)}) — {role}: {mark}"
+            )
+        nodes_block = "\n".join(node_lines) + "\n\n"
+    else:
+        nodes_block = ""
+
     text = (
         "<b>🛠 Состояние сервера</b>\n\n"
         f"🤖 Главный бот: {bot_up}\n"
@@ -595,6 +611,7 @@ async def system_status(message: Message) -> None:
         f"   🔑 Ключей в proxy-конфиге: {keys_line}\n\n"
         "<b>🌐 TLS-домены (маскировка)</b>\n"
         f"{tls_block}\n\n"
+        f"{nodes_block}"
         f"💾 Диск VPS: {disk_line}\n"
         f"🧠 Память VPS: {mem_line}\n"
         f"📡 Адрес сервера: {settings.server_host}:{settings.proxy_port}\n\n"
