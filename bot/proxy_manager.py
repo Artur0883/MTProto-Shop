@@ -639,7 +639,14 @@ async def list_clients() -> dict[str, str]:
     if isinstance(resp, list):
         users: Any = resp
     elif isinstance(resp, dict):
-        users = resp.get("users") or resp
+        # TeleMT wraps the list under "data" ({"ok":true,"data":[...]}); older/other
+        # shapes use "users" or a username-keyed dict. Explicit None checks (not `or`)
+        # so an empty list stays an empty list instead of falling through to the dict.
+        users = resp.get("users")
+        if users is None:
+            users = resp.get("data")
+        if users is None:
+            users = resp
     else:
         return {}
 
