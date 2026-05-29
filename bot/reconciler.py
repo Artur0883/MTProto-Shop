@@ -15,7 +15,7 @@ from config import get_settings
 from database import get_all_active_subscriptions
 from logging_setup import get_logger
 from nodes import get_nodes
-from reconcile_logic import diff_users
+from reconcile_logic import diff_users, present_usernames
 from telemt_client import api_call
 
 
@@ -24,17 +24,6 @@ logger = get_logger(__name__)
 
 def _client_id(telegram_id: int) -> str:
     return f"tg_{telegram_id}"
-
-
-def _present_usernames(api_users: object) -> set[str]:
-    """Extract usernames from a TeleMT `GET /v1/users` response."""
-    names: set[str] = set()
-    data = api_users.get("data") if isinstance(api_users, dict) else None
-    if isinstance(data, list):
-        for item in data:
-            if isinstance(item, dict) and isinstance(item.get("username"), str):
-                names.add(item["username"])
-    return names
 
 
 async def reconcile_once() -> None:
@@ -54,7 +43,7 @@ async def reconcile_once() -> None:
         except Exception:
             logger.warning("event=reconcile_node_unreachable", node=node.name)
             continue
-        present = _present_usernames(resp)
+        present = present_usernames(resp)
         to_add, to_remove = diff_users(desired, present, protected)
         for client_id in to_add:
             secret = desired_secret.get(client_id)
