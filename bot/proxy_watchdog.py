@@ -36,7 +36,7 @@ def _proxy_client_endpoint() -> tuple[str, int]:
     """Host:port of the LOCAL proxy's client listener (the one we can restart)."""
     settings = get_settings()
     host = urlparse(settings.telemt_api_url).hostname or "mtproto"
-    return host, settings.proxy_port
+    return host, settings.telemt_proxy_internal_port
 
 
 async def probe_client_port(host: str, port: int, *, timeout: float, sni: str) -> bool:
@@ -74,7 +74,7 @@ def _seconds_since_last_restart() -> float | None:
 
 def _request_restart() -> None:
     RESTART_REQUEST_PATH.parent.mkdir(parents=True, exist_ok=True)
-    RESTART_REQUEST_PATH.write_text(datetime.now(UTC).isoformat())
+    RESTART_REQUEST_PATH.write_text(f"mtproto\n{datetime.now(UTC).isoformat()}")
 
 
 async def proxy_watchdog_loop(bot: Bot) -> None:

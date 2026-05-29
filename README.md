@@ -77,6 +77,7 @@ TLS_DOMAINS=www.cloudflare.com,www.apple.com,www.bing.com
 PROXY_CORE=telemt
 TELEMT_API_URL=http://mtproto:9091
 TELEMT_SYSTEM_USER=shop_bootstrap
+TELEMT_PROXY_INTERNAL_PORT=443
 
 # Опционально — тонкая настройка отказоустойчивости
 TELEMT_API_TIMEOUT=5.0
@@ -90,6 +91,9 @@ DATABASE_PATH=/app/data/shop.db
 PAYMENT_MODE=manual
 DEV_AUTO_ISSUE=false
 PAYMENTS_ENABLED=true
+
+BOT_HEALTHCHECK_MAX_AGE=180
+SUPPORT_BOT_HEALTHCHECK_MAX_AGE=180
 
 # Логи: json для production, console для локалки
 LOG_LEVEL=INFO

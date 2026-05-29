@@ -149,8 +149,8 @@ async def main() -> None:
                 beat_path.touch()
                 await healthcheck_ping()
             except Exception:
-                # Brief Telegram blip: skip the beat. The 90s healthcheck
-                # window tolerates a couple of misses; sustained failure goes
+                # Brief Telegram blip: skip the beat. The Docker healthcheck
+                # max-age window tolerates a few misses; sustained failure goes
                 # stale -> unhealthy -> autoheal restarts the container.
                 logger.warning("event=bot_heartbeat_probe_failed")
             await asyncio.sleep(30)

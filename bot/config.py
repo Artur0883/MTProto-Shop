@@ -47,6 +47,7 @@ class Settings(BaseSettings):
     # --- Proxy public endpoint ---
     server_host: str = Field(default="SERVER_HOST")
     proxy_port: int = Field(default=443, ge=1, le=65535)
+    telemt_proxy_internal_port: int = Field(default=443, ge=1, le=65535)
 
     # --- TLS-маскировка (DPI bypass) ---
     tls_domain: str = Field(default="www.microsoft.com", description="Primary TLS domain")
