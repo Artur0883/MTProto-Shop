@@ -108,6 +108,15 @@ class Settings(BaseSettings):
     proxy_nodes: list[dict] = Field(default_factory=list)
     reconcile_interval: float = Field(default=300.0, gt=0)
 
+    # --- Proxy serving watchdog ---
+    # Probes the client port like a real client. Restarts a proxy that is alive
+    # (API up) but no longer accepting connections — the gap the liveness
+    # healthcheck + autoheal miss (hung listener / middle-proxy churn).
+    proxy_serving_watchdog_enabled: bool = Field(default=True)
+    proxy_serving_check_interval: float = Field(default=30.0, gt=0)
+    proxy_serving_failure_threshold: int = Field(default=3, gt=0)
+    proxy_restart_cooldown: float = Field(default=600.0, gt=0)
+
     @field_validator("admin_id", mode="before")
     @classmethod
     def _parse_admin_id(cls, v):
