@@ -25,10 +25,12 @@ MTProto-Shop использует TLS-маскировку (`tls_emulation = tru
    `TLS_DOMAINS=a.com,b.com,c.com` и тот же набор в
    `telemt/config.toml` как `tls_domains = ["a.com", "b.com", "c.com"]`.
    TeleMT сможет принять эти Fake-TLS домены, а бот предложит ссылки через
-   кнопку **🌐 Альтернативные ссылки**. Основная ссылка всегда использует `TLS_DOMAIN`.
-2. **Авто-проверка.** Бот периодически (каждые 5 минут) делает реальный TLS handshake
-   до каждого домена и показывает состояние доменов в диагностике. Основная ссылка
-   остаётся предсказуемой и использует `TLS_DOMAIN`; резервные домены выдаются отдельно.
+   кнопку **🌐 Альтернативные ссылки**. Основная ссылка использует `TLS_DOMAIN`,
+   а при Self-Heal переключении — здоровый домен из настроенного пула.
+2. **Авто-проверка.** Бот периодически (по умолчанию раз в 60 секунд) делает
+   реальный TLS handshake до каждого домена и показывает состояние доменов в
+   диагностике. Self-Heal переключает новые ссылки только после нескольких
+   подряд проб, чтобы не реагировать на одиночный сетевой сбой.
 3. **Ротация ключа.** Клиент может нажать **🔄 Обновить ключ** в разделе
    «📅 Моя подписка». Старый ключ перестаёт работать через ~5 секунд.
 
@@ -72,6 +74,9 @@ PROXY_PORT=443
 # TLS-маскировка
 TLS_DOMAIN=www.microsoft.com
 TLS_DOMAINS=www.cloudflare.com,www.apple.com,www.bing.com
+TLS_PROBE_INTERVAL=60
+TLS_PROBE_TIMEOUT=4.0
+TLS_PROBE_HISTORY_SIZE=5
 
 # TeleMT API
 PROXY_CORE=telemt
@@ -94,6 +99,12 @@ PAYMENTS_ENABLED=true
 
 BOT_HEALTHCHECK_MAX_AGE=180
 SUPPORT_BOT_HEALTHCHECK_MAX_AGE=180
+
+SELF_HEAL_ENABLED=true
+SELF_HEAL_CHECK_INTERVAL=60
+SELF_HEAL_MIN_PROBE_SAMPLES=3
+SELF_HEAL_SWITCH_COOLDOWN=600
+SELF_HEAL_MAX_SWITCHES_PER_DAY=6
 
 # Логи: json для production, console для локалки
 LOG_LEVEL=INFO
@@ -282,7 +293,7 @@ mtp
 
 После смены `SERVER_HOST` или `TLS_DOMAIN` активным клиентам нужно открыть **🔑 Мои ключи** и подключить новую ссылку.
 
-Одна установка TeleMT использует один `SERVER_HOST`, основной `TLS_DOMAIN` и при необходимости список `tls_domains`. Для альтернативных ссылок список должен совпадать в `.env` (`TLS_DOMAINS`) и в секции `[censorship]` файла `telemt/config.toml` (`tls_domains`). Основная ссылка кодируется с основным `TLS_DOMAIN`, а резервные домены выдаются отдельно как альтернативные `ee`-ссылки. Plain MTProto (`dd...`) без TLS-маскировки проект намеренно не отдаёт как fallback.
+Одна установка TeleMT использует один `SERVER_HOST`, основной `TLS_DOMAIN` и при необходимости список `tls_domains`. Для альтернативных ссылок список должен совпадать в `.env` (`TLS_DOMAINS`) и в секции `[censorship]` файла `telemt/config.toml` (`tls_domains`). Обычно основная ссылка кодируется с основным `TLS_DOMAIN`; если Self-Heal временно переключил активный домен, новые ссылки используют здоровый домен из того же пула. Plain MTProto (`dd...`) без TLS-маскировки проект намеренно не отдаёт как fallback.
 
 ## Админские функции
 

@@ -37,7 +37,10 @@ def _build_state(rt: _Runtime) -> SelfHealState:
     domains = tuple(
         DomainHealth(
             domain=s.domain,
-            probed=s.last_probed_at is not None,
+            probed=(
+                s.last_probed_at is not None
+                and len(s.recent) >= settings.self_heal_min_probe_samples
+            ),
             last_ok=s.last_ok,
             success_rate=s.success_rate,
         )

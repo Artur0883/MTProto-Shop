@@ -157,7 +157,7 @@ def build_alternative_links(
 
     Ordering:
       1. `preferred_domain` (if given and valid) is placed first.
-      2. Else configured order from `settings.fallback_tls_domains`.
+      2. Else active primary domain from Self-Heal/config is placed first.
       3. Picker ranking is used only when `prefer_picker=True` is passed
          explicitly by diagnostic/admin flows.
 
@@ -186,9 +186,10 @@ def build_alternative_links(
         if d not in ordered:
             ordered.append(d)
 
-    if preferred_domain and preferred_domain in ordered:
-        ordered.remove(preferred_domain)
-        ordered.insert(0, preferred_domain)
+    primary_domain = preferred_domain or pick_primary_tls_domain()
+    if primary_domain in ordered:
+        ordered.remove(primary_domain)
+        ordered.insert(0, primary_domain)
 
     ordered = ordered[:max_count] or [settings.tls_domain]
     return [
@@ -530,7 +531,7 @@ async def get_link(client_id: str) -> str:
                 settings.server_host,
                 settings.proxy_port,
                 restored_secret,
-                settings.tls_domain,
+                pick_primary_tls_domain(),
             )
         raise ClientNotFoundError(
             f"Клиент {client_id} не найден в TeleMT, активная подписка с secret в SQLite не найдена"
@@ -543,7 +544,7 @@ async def get_link(client_id: str) -> str:
         secret = await create_secret(client_id)
         secret_source = "create_or_existing"
 
-    domain = settings.tls_domain
+    domain = pick_primary_tls_domain()
     link = build_tls_proxy_link(
         settings.server_host,
         settings.proxy_port,
@@ -556,7 +557,7 @@ async def get_link(client_id: str) -> str:
         link_source="local_fake_tls",
         prefer_picker=False,
         tls_domain=domain,
-        used_configured_fallback=True,
+        used_configured_fallback=domain == settings.tls_domain,
         api_tls_link_found=api_link_found,
         secret_source=secret_source,
         server_host=settings.server_host,

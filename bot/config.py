@@ -55,6 +55,23 @@ class Settings(BaseSettings):
         default="",
         description="CSV of fallback TLS domains, e.g. 'www.cloudflare.com,www.apple.com,www.bing.com'",
     )
+    tls_probe_interval: float = Field(
+        default=60.0,
+        gt=0,
+        description="Seconds between background TLS domain probes",
+    )
+    tls_probe_timeout: float = Field(
+        default=4.0,
+        gt=0,
+        le=30,
+        description="Per-domain TLS handshake timeout in seconds",
+    )
+    tls_probe_history_size: int = Field(
+        default=5,
+        ge=1,
+        le=20,
+        description="Number of recent TLS probe results used for success_rate",
+    )
 
     # --- TeleMT API ---
     proxy_core: str = Field(default="telemt")
@@ -99,7 +116,8 @@ class Settings(BaseSettings):
 
     # --- Self-heal ---
     self_heal_enabled: bool = Field(default=True)
-    self_heal_check_interval: float = Field(default=120.0, gt=0)
+    self_heal_check_interval: float = Field(default=60.0, gt=0)
+    self_heal_min_probe_samples: int = Field(default=3, ge=1, le=20)
     self_heal_switch_cooldown: float = Field(default=600.0, ge=0)
     self_heal_max_switches_per_day: int = Field(default=6, ge=0)
 

@@ -24,7 +24,7 @@ logger = get_logger(__name__)
 
 
 PROBE_TIMEOUT_SECONDS = 4.0
-DEFAULT_PROBE_INTERVAL_SECONDS = 300.0  # 5 minutes
+DEFAULT_PROBE_INTERVAL_SECONDS = 60.0
 DEFAULT_PROBE_PORT = 443
 _HISTORY_SIZE = 5
 
@@ -43,16 +43,23 @@ class DomainStats:
             return 0.0
         return sum(1 for x in self.recent if x) / len(self.recent)
 
-    def record(self, ok: bool, latency_ms: float | None) -> None:
+    def record(
+        self, ok: bool, latency_ms: float | None, *, history_size: int = _HISTORY_SIZE
+    ) -> None:
         self.last_ok = ok
         self.last_latency_ms = latency_ms
         self.last_probed_at = time.time()
         self.recent.append(ok)
-        if len(self.recent) > _HISTORY_SIZE:
-            self.recent = self.recent[-_HISTORY_SIZE:]
+        if len(self.recent) > history_size:
+            self.recent = self.recent[-history_size:]
 
 
-async def probe_domain(domain: str, port: int = DEFAULT_PROBE_PORT) -> tuple[bool, float | None]:
+async def probe_domain(
+    domain: str,
+    port: int = DEFAULT_PROBE_PORT,
+    *,
+    timeout: float = PROBE_TIMEOUT_SECONDS,
+) -> tuple[bool, float | None]:
     """Open a TLS connection to `domain:port` and time the handshake.
 
     Returns (ok, latency_ms). On any error returns (False, None).
@@ -62,7 +69,7 @@ async def probe_domain(domain: str, port: int = DEFAULT_PROBE_PORT) -> tuple[boo
     try:
         reader, writer = await asyncio.wait_for(
             asyncio.open_connection(host=domain, port=port, ssl=ctx, server_hostname=domain),
-            timeout=PROBE_TIMEOUT_SECONDS,
+            timeout=timeout,
         )
         latency_ms = (time.monotonic() - started) * 1000.0
         writer.close()
@@ -107,12 +114,17 @@ class TLSDomainPicker:
         domains = settings.fallback_tls_domains
         self._ensure_stats(domains)
         results = await asyncio.gather(
-            *(probe_domain(d) for d in domains), return_exceptions=False
+            *(probe_domain(d, timeout=settings.tls_probe_timeout) for d in domains),
+            return_exceptions=False,
         )
         async with self._lock:
             for d, (ok, latency) in zip(domains, results):
                 stats = self._stats.setdefault(d, DomainStats(domain=d))
-                stats.record(ok, latency)
+                stats.record(
+                    ok,
+                    latency,
+                    history_size=settings.tls_probe_history_size,
+                )
         ranked = self.ranked()
         logger.info(
             "event=tls_probe_complete",

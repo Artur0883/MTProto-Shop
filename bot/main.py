@@ -223,7 +223,7 @@ async def main() -> None:
             proxy_watchdog_task = asyncio.create_task(proxy_watchdog_loop(bot))
         if len(get_nodes()) > 1:
             reconciler_task = asyncio.create_task(reconciler_loop(bot))
-        picker.start()
+        picker.start(settings.tls_probe_interval)
         # Probe immediately so the first user request already has rankings.
         asyncio.create_task(picker.probe_all())
         logger.info(

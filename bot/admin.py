@@ -57,6 +57,7 @@ from proxy_manager import (
     get_circuit_state,
     list_clients,
     mask_secret,
+    pick_primary_tls_domain,
     rotate_secret,
 )
 import runtime
@@ -205,7 +206,7 @@ def subscription_link(secret: str) -> str:
         settings.server_host,
         settings.proxy_port,
         secret,
-        settings.tls_domain,
+        pick_primary_tls_domain(),
     )
 
 
